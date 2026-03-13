@@ -311,6 +311,11 @@ app.get("/api/stats",async(req,res)=>{
 });
 
 // ── START ──────────────────────────────────────────────────
+app.get('/test-ntfy', async (req, res) => {
+  await notify('S0NAR Test', 'ntfy is working! S0NAR is live.', 'high');
+  res.json({ sent: true, topic: NTFY_TOPIC || 'not set' });
+});
+
 app.listen(PORT,async()=>{
   console.log(`
 ╔══════════════════════════════════════╗
