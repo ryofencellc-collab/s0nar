@@ -1,7 +1,7 @@
 {
   "name": "s0nar-backend",
   "version": "3.0.0",
-  "description": "S0NAR Iron Dome — live Solana meme coin paper trading",
+  "description": "S0NAR — Iron Dome meme coin signal tracker",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,7 +10,7 @@
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "node-fetch": "^2.7.0",
-    "@supabase/supabase-js": "^2.39.0"
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=18.0.0"
