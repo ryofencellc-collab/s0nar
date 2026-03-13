@@ -48,6 +48,8 @@ let qi=0;
 
 async function notify(title, body, priority="default") {
   if (!NTFY_TOPIC) return;
+  const safeTitle = title.replace(/[^ -~]/g, '').trim();
+  const safeBody  = (body||'').replace(/[^ -~]/g, '').trim();
   try { await fetch(`https://ntfy.sh/${NTFY_TOPIC}`,{method:"POST",headers:{"Title":title,"Priority":priority,"Tags":"chart_with_upwards_trend"},body}); }
   catch(e){console.error("ntfy:",e.message);}
 }
