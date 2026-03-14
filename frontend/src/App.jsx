@@ -1,4 +1,4 @@
-// S0NAR App.jsx v5.3 — self-hosted, password protected, no Netlify
+// S0NAR App.jsx v5.4 — Stealth Score detection + iOS optimized
 import { useState, useEffect } from "react";
 
 // ── CONSTANTS (declared first — used throughout) ───────────
@@ -305,17 +305,26 @@ function AppInner({ token, headers, onLogout }) {
     .sort((a,b) => btSort==="fomo" ? num(b.fomo)-num(a.fomo) : num(b.score)-num(a.score));
 
   return (
-    <div style={{background:BG,minHeight:"100vh",color:"#b0c8d8",fontFamily:"'Courier New',monospace",maxWidth:440,margin:"0 auto",display:"flex",flexDirection:"column"}}>
+    <div style={{
+      background:BG, minHeight:"100vh", color:"#b0c8d8",
+      fontFamily:"'Courier New',monospace",
+      maxWidth:430, width:"100%", margin:"0 auto",
+      display:"flex", flexDirection:"column",
+      overflowX:"hidden", // prevent horizontal scroll
+      WebkitTextSizeAdjust:"100%", // prevent iOS font scaling
+    }}>
       <style>{`
         *{box-sizing:border-box;margin:0;padding:0}
+        html,body{overflow-x:hidden;width:100%;-webkit-text-size-adjust:100%}
         ::-webkit-scrollbar{width:2px}
         ::-webkit-scrollbar-thumb{background:${BORDER}}
         @keyframes glow{0%,100%{opacity:1}50%{opacity:.45}}
         @keyframes blink{0%,100%{opacity:1}50%{opacity:.1}}
         @keyframes slide{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
         @keyframes spin{to{transform:rotate(360deg)}}
-        .btn{cursor:pointer;border:none;font-family:monospace;transition:all .15s}
-        a{color:inherit;text-decoration:none}
+        .btn{cursor:pointer;border:none;font-family:monospace;transition:all .15s;-webkit-tap-highlight-color:transparent}
+        a{color:inherit;text-decoration:none;-webkit-tap-highlight-color:transparent}
+        input,button{-webkit-appearance:none}
       `}</style>
 
       {/* Circuit breaker banner */}
@@ -326,27 +335,27 @@ function AppInner({ token, headers, onLogout }) {
       )}
 
       {/* ── HEADER ── */}
-      <div style={{padding:"12px 18px 10px",borderBottom:`1px solid ${BORDER}`,background:CARD,position:"sticky",top:0,zIndex:10}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div>
-            <div style={{fontSize:17,fontWeight:900,letterSpacing:3,color:G,animation:"glow 4s ease-in-out infinite"}}>◉ S0NAR</div>
-            <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2,flexWrap:"wrap"}}>
+      <div style={{padding:"10px 12px 8px",borderBottom:`1px solid ${BORDER}`,background:CARD,position:"sticky",top:0,zIndex:10,width:"100%"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%",minWidth:0}}>
+          <div style={{minWidth:0,flex:1}}>
+            <div style={{fontSize:16,fontWeight:900,letterSpacing:3,color:G,animation:"glow 4s ease-in-out infinite"}}>◉ S0NAR</div>
+            <div style={{display:"flex",alignItems:"center",gap:5,marginTop:2,flexWrap:"wrap"}}>
               <div style={{display:"flex",alignItems:"center",gap:4}}>
-                <div style={{width:6,height:6,borderRadius:"50%",background:online?G:R,animation:"blink 1.8s infinite"}}/>
+                <div style={{width:6,height:6,borderRadius:"50%",background:online?G:R,animation:"blink 1.8s infinite",flexShrink:0}}/>
                 <span style={{fontSize:7,color:DIM}}>{online?`LIVE · ${lastUp?.toLocaleTimeString()}`:"OFFLINE"}</span>
               </div>
               {dome.marketMood && (
-                <span style={{fontSize:7,padding:"1px 6px",borderRadius:6,background:`${mood2c(dome.marketMood)}18`,color:mood2c(dome.marketMood),border:`1px solid ${mood2c(dome.marketMood)}44`}}>
+                <span style={{fontSize:7,padding:"1px 5px",borderRadius:6,background:`${mood2c(dome.marketMood)}18`,color:mood2c(dome.marketMood),border:`1px solid ${mood2c(dome.marketMood)}44`}}>
                   {String(dome.marketMood).toUpperCase()}
                 </span>
               )}
               {dome.dynamicMinScore && <span style={{fontSize:7,color:DIM}}>MIN:{dome.dynamicMinScore}</span>}
-              {dome.pollCount>0      && <span style={{fontSize:7,color:DIM}}>#{dome.pollCount}</span>}
+              {dome.pollCount>0 && <span style={{fontSize:7,color:DIM}}>#{dome.pollCount}</span>}
             </div>
           </div>
-          <div style={{textAlign:"right"}}>
+          <div style={{textAlign:"right",flexShrink:0,paddingLeft:8}}>
             <div style={{fontSize:7,color:DIM}}>BANKROLL</div>
-            <div style={{fontSize:21,fontWeight:900,color:bankroll>=1000?G:R}}>${Math.round(bankroll)}</div>
+            <div style={{fontSize:20,fontWeight:900,color:bankroll>=1000?G:R}}>${Math.round(bankroll)}</div>
             <div style={{fontSize:8,color:num(roi)>=0?G:R}}>{num(roi)>=0?"▲":"▼"} {Math.abs(num(roi)).toFixed(1)}% ROI</div>
             <button onClick={onLogout}
               style={{fontSize:6,color:DIM,background:"transparent",border:"none",cursor:"pointer",letterSpacing:1,marginTop:2}}>
@@ -357,14 +366,14 @@ function AppInner({ token, headers, onLogout }) {
       </div>
 
       {/* ── TABS ── */}
-      <div style={{display:"flex",background:CARD,borderBottom:`1px solid ${BORDER}`,overflowX:"auto"}}>
+      <div style={{display:"flex",background:CARD,borderBottom:`1px solid ${BORDER}`,overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
         {[
           ["home","HOME"],["fomo","FOMO"],["dome","DOME"],
           ["backtest","TEST"],["signals","SIGS"],["trades","TRADES"],
           ["record","RECORD"],["debug","DEBUG"],
         ].map(([v,l]) => (
           <button key={v} className="btn" onClick={()=>{ setView(v); if(v==="debug") fetchDebug(); }}
-            style={{flex:"0 0 auto",padding:"8px 9px",fontSize:8,color:view===v?G:DIM,
+            style={{flex:"0 0 auto",padding:"8px 8px",fontSize:8,color:view===v?G:DIM,
               borderBottom:`2px solid ${view===v?G:"transparent"}`,background:"transparent",whiteSpace:"nowrap"}}>
             {l}
             {v==="trades"  && open.length>0  ? <span style={{color:Y}}> ({open.length})</span>  : ""}
@@ -377,7 +386,7 @@ function AppInner({ token, headers, onLogout }) {
           HOME
          ══════════════════════════════════════════════════════ */}
       {view==="home" && (
-        <div style={{flex:1,padding:"14px 16px",overflowY:"auto"}}>
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           {/* P&L + equity curve */}
           <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"14px",marginBottom:10}}>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
@@ -443,8 +452,67 @@ function AppInner({ token, headers, onLogout }) {
             </div>
           )}
 
+          {/* Stealth performance card */}
+          {stats?.stealthStats && stats.stealthStats.trades > 0 && (
+            <div style={{background:CARD,border:`1px solid ${P}33`,borderRadius:12,padding:"10px 12px",marginBottom:10}}>
+              <div style={{fontSize:7,color:P,letterSpacing:2,marginBottom:8}}>STEALTH PERFORMANCE</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:8}}>
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:7,color:DIM}}>TRADES</div>
+                  <div style={{fontSize:16,fontWeight:900,color:P}}>{stats.stealthStats.trades}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:7,color:DIM}}>WIN RATE</div>
+                  <div style={{fontSize:16,fontWeight:900,color:stats.stealthStats.winRate>=50?G:R}}>
+                    {stats.stealthStats.winRate!=null?`${fix0(stats.stealthStats.winRate)}%`:"--"}
+                  </div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:7,color:DIM}}>AVG P&L</div>
+                  <div style={{fontSize:16,fontWeight:900,color:num(stats.stealthStats.avgPnl)>=0?G:R}}>
+                    {stats.stealthStats.avgPnl!=null?fmt$(stats.stealthStats.avgPnl):"--"}
+                  </div>
+                </div>
+              </div>
+
+              {/* vs Normal comparison */}
+              {stats.stealthStats.vsNormal && (
+                <div style={{background:"#090f17",borderRadius:8,padding:"8px",fontSize:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={{color:P,fontWeight:700}}>STEALTH</span>
+                    <span style={{color:DIM}}>NORMAL</span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                    <span style={{color:num(stats.stealthStats.vsNormal.stealthWR)>=50?G:R}}>
+                      {fix1(stats.stealthStats.vsNormal.stealthWR)}% WR
+                    </span>
+                    <span style={{color:num(stats.stealthStats.vsNormal.normalWR)>=50?G:R}}>
+                      {fix1(stats.stealthStats.vsNormal.normalWR)}% WR
+                    </span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span style={{color:num(stats.stealthStats.vsNormal.stealthAvg)>=0?G:R}}>
+                      avg {fmt$(stats.stealthStats.vsNormal.stealthAvg)}
+                    </span>
+                    <span style={{color:num(stats.stealthStats.vsNormal.normalAvg)>=0?G:R}}>
+                      avg {fmt$(stats.stealthStats.vsNormal.normalAvg)}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {stats.stealthStats.best && (
+                <div style={{marginTop:8,fontSize:8,color:DIM}}>
+                  Best stealth: <span style={{color:P,fontWeight:700}}>{stats.stealthStats.best.ticker}</span>
+                  <span style={{color:G,marginLeft:6}}>{fmt$(stats.stealthStats.best.pnl)}</span>
+                  <span style={{color:DIM,marginLeft:4}}>{fix2(stats.stealthStats.best.mult)}x</span>
+                </div>
+              )}
+            </div>
+          )}
+
           {stats?.best && (
-            <div style={{background:`${G}0c`,border:`1px solid ${G}28`,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
+            <div style={{background:`${G}0c`,border:`1px solid ${G}28`,borderRadius:12,padding:"10px 12px",marginBottom:10}}>
               <div style={{fontSize:7,color:G,letterSpacing:2,marginBottom:6}}>BEST TRADE</div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div>
@@ -467,7 +535,7 @@ function AppInner({ token, headers, onLogout }) {
           FOMO FEED
          ══════════════════════════════════════════════════════ */}
       {view==="fomo" && (
-        <div style={{flex:1,padding:"12px 16px",overflowY:"auto"}}>
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div>
               <div style={{fontSize:7,color:O,letterSpacing:2}}>LIVE FOMO RADAR · 10 MIN</div>
@@ -491,7 +559,7 @@ function AppInner({ token, headers, onLogout }) {
               <div key={sig.id||i} style={{
                 background:CARD,
                 border:`1px solid ${hot ? fc+"44" : BORDER}`,
-                borderRadius:12,padding:"12px 13px",marginBottom:8,
+                borderRadius:12,padding:"10px 12px",marginBottom:8,
                 borderLeft:`3px solid ${sig.entered?G:fc}`,
                 animation:i<3?"slide .3s ease":"none",
               }}>
@@ -544,7 +612,7 @@ function AppInner({ token, headers, onLogout }) {
           DOME
          ══════════════════════════════════════════════════════ */}
       {view==="dome" && (
-        <div style={{flex:1,padding:"14px 16px",overflowY:"auto"}}>
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:12}}>IRON DOME v5.1 — 8 LAYERS</div>
           {[
             { n:1, label:"Quality Gate",    color:G,
@@ -629,7 +697,7 @@ function AppInner({ token, headers, onLogout }) {
           BACKTEST
          ══════════════════════════════════════════════════════ */}
       {view==="backtest" && (
-        <div style={{flex:1,padding:"14px 16px",overflowY:"auto"}}>
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"14px",marginBottom:10}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:6}}>FOMO BACKTEST v5.1</div>
             <div style={{fontSize:9,color:DIM,marginBottom:10,lineHeight:1.6}}>
@@ -702,7 +770,7 @@ function AppInner({ token, headers, onLogout }) {
               {btTrades.slice(0,40).map((t,i) => (
                 <div key={i} style={{background:CARD,
                   border:`1px solid ${t.wouldEnter?(num(t.pnl)>=0?G+"44":R+"44"):BORDER}`,
-                  borderRadius:10,padding:"11px 13px",marginBottom:7,
+                  borderRadius:10,padding:"10px 12px",marginBottom:7,
                   borderLeft:`3px solid ${t.wouldEnter?(num(t.pnl)>=0?G:R):BORDER}`}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
@@ -744,7 +812,7 @@ function AppInner({ token, headers, onLogout }) {
           SIGNALS
          ══════════════════════════════════════════════════════ */}
       {view==="signals" && (
-        <div style={{flex:1,padding:"12px 16px",overflowY:"auto"}}>
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2}}>ALL SIGNALS · EVERY 15s</div>
             <button className="btn" onClick={fetchAll}
@@ -804,7 +872,7 @@ function AppInner({ token, headers, onLogout }) {
           TRADES
          ══════════════════════════════════════════════════════ */}
       {view==="trades" && (
-        <div style={{flex:1,padding:"12px 16px",overflowY:"auto"}}>
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           {openSorted.length>0 && (
             <>
               {/* Open positions header with total unrealized P&L */}
@@ -843,16 +911,22 @@ function AppInner({ token, headers, onLogout }) {
 
                 return (
                   <div key={t.id} style={{background:CARD,border:`1px solid ${borderC}`,borderRadius:10,
-                    padding:"12px 13px",marginBottom:8,borderLeft:`3px solid ${fomo2c(t.fomo_score)}`}}>
+                    padding:"10px 12px",marginBottom:8,borderLeft:`3px solid ${fomo2c(t.fomo_score)}`}}>
 
                     {/* Top row: identity + live status */}
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                       <div style={{display:"flex",alignItems:"center",gap:8}}>
                         <FomoRing f={t.fomo_score||0} size={38}/>
                         <div>
-                          <span style={{fontSize:13,fontWeight:900,color:"white"}}>{t.ticker}</span>
-                          {t.dex_url && <a href={t.dex_url} target="_blank" rel="noopener"
-                            style={{fontSize:8,color:B,marginLeft:8}}>↗</a>}
+                          <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                            <span style={{fontSize:13,fontWeight:900,color:"white"}}>{t.ticker}</span>
+                            {t.is_stealth && (
+                              <span style={{fontSize:7,padding:"1px 5px",borderRadius:4,
+                                background:`${P}22`,color:P,border:`1px solid ${P}44`}}>STEALTH</span>
+                            )}
+                            {t.dex_url && <a href={t.dex_url} target="_blank" rel="noopener"
+                              style={{fontSize:8,color:B,marginLeft:4}}>↗</a>}
+                          </div>
                         </div>
                       </div>
                       <div style={{textAlign:"right"}}>
@@ -867,25 +941,25 @@ function AppInner({ token, headers, onLogout }) {
 
                     {/* Live P&L display — the main new feature */}
                     {hasPnl ? (
-                      <div style={{background:"#090f17",borderRadius:8,padding:"10px 12px",marginBottom:8}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div style={{background:"#090f17",borderRadius:8,padding:"10px",marginBottom:8}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",width:"100%"}}>
                           {/* Current P&L */}
-                          <div>
-                            <div style={{fontSize:7,color:DIM,marginBottom:2}}>UNREALIZED P&L</div>
-                            <div style={{fontSize:18,fontWeight:900,color:upnl>=0?G:R,fontFamily:"monospace"}}>
+                          <div style={{minWidth:0,flex:1}}>
+                            <div style={{fontSize:7,color:DIM,marginBottom:2}}>UNREALIZED</div>
+                            <div style={{fontSize:16,fontWeight:900,color:upnl>=0?G:R,fontFamily:"monospace"}}>
                               {upnl>=0?"+":""}{fmt$(upnl,false)}
                             </div>
                           </div>
                           {/* Current multiplier */}
-                          <div style={{textAlign:"center"}}>
-                            <div style={{fontSize:7,color:DIM,marginBottom:2}}>CURRENT</div>
-                            <div style={{fontSize:16,fontWeight:900,color:pct>=0?G:R,fontFamily:"monospace"}}>
+                          <div style={{textAlign:"center",flexShrink:0,padding:"0 8px"}}>
+                            <div style={{fontSize:7,color:DIM,marginBottom:2}}>NOW</div>
+                            <div style={{fontSize:14,fontWeight:900,color:pct>=0?G:R,fontFamily:"monospace"}}>
                               {pct>=0?"+":""}{fix1(pct)}%
                             </div>
                             <div style={{fontSize:8,color:DIM}}>{fix2(curMult)}x</div>
                           </div>
                           {/* Peak */}
-                          <div style={{textAlign:"right"}}>
+                          <div style={{textAlign:"right",flexShrink:0}}>
                             <div style={{fontSize:7,color:DIM,marginBottom:2}}>PEAK</div>
                             <div style={{fontSize:14,fontWeight:900,color:G,fontFamily:"monospace"}}>
                               {fix2(hiMult)}x
@@ -949,11 +1023,17 @@ function AppInner({ token, headers, onLogout }) {
             <>
               <div style={{fontSize:8,color:DIM,letterSpacing:2,margin:"10px 0 8px"}}>CLOSED · {closed.length}</div>
               {[...closed].reverse().map(t => (
-                <div key={t.id} style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,
-                  padding:"12px 13px",marginBottom:7,borderLeft:`3px solid ${num(t.pnl)>0?G:R}`}}>
+                <div key={t.id} style={{background:CARD,
+                  border:`1px solid ${t.is_stealth?P+"44":BORDER}`,borderRadius:10,
+                  padding:"10px 12px",marginBottom:7,
+                  borderLeft:`3px solid ${t.is_stealth?P:num(t.pnl)>0?G:R}`}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <div>
                       <span style={{fontSize:13,fontWeight:900,color:"white"}}>{t.ticker}</span>
+                      {t.is_stealth && (
+                        <span style={{fontSize:7,marginLeft:6,padding:"1px 5px",borderRadius:4,
+                          background:`${P}22`,color:P,border:`1px solid ${P}44`}}>STEALTH</span>
+                      )}
                       {t.dex_url && <a href={t.dex_url} target="_blank" rel="noopener"
                         style={{fontSize:8,color:B,marginLeft:8}}>↗</a>}
                     </div>
@@ -965,6 +1045,7 @@ function AppInner({ token, headers, onLogout }) {
                   <div style={{display:"flex",gap:10,marginTop:5,fontSize:8,color:DIM,flexWrap:"wrap"}}>
                     <span>sc:<span style={{color:sc2c(t.score)}}>{t.score}</span></span>
                     <span>fomo:<span style={{color:fomo2c(t.fomo_score)}}>{t.fomo_score||0}</span></span>
+                    {t.stealth_score>0&&<span>st:<span style={{color:P}}>{t.stealth_score}</span></span>}
                     <span>bet:${t.bet_size}</span>
                     <span>hi:{fix2(t.highest_mult)}x</span>
                     {t.market_mood && <span style={{color:mood2c(t.market_mood)}}>{t.market_mood}</span>}
@@ -988,7 +1069,7 @@ function AppInner({ token, headers, onLogout }) {
           RECORD
          ══════════════════════════════════════════════════════ */}
       {view==="record" && (
-        <div style={{flex:1,padding:"12px 16px",overflowY:"auto"}}>
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"14px",marginBottom:10}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:8}}>EQUITY CURVE</div>
             <EqChart data={stats?.equity||[]} color={num(stats?.totalPnl)>=0?G:R}/>
@@ -1050,6 +1131,40 @@ function AppInner({ token, headers, onLogout }) {
             ))}
           </div>
 
+          </div>
+
+          {/* Stealth vs Normal comparison in record */}
+          {stats?.stealthStats && stats.stealthStats.trades > 0 && (
+            <div style={{background:CARD,border:`1px solid ${P}33`,borderRadius:12,padding:"13px",marginBottom:10}}>
+              <div style={{fontSize:7,color:P,letterSpacing:2,marginBottom:10}}>STEALTH vs NORMAL</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
+                <div style={{background:`${P}0c`,borderRadius:8,padding:"8px",textAlign:"center"}}>
+                  <div style={{fontSize:7,color:P,marginBottom:4}}>STEALTH ({stats.stealthStats.trades}t)</div>
+                  <div style={{fontSize:16,fontWeight:900,color:num(stats.stealthStats.winRate)>=50?G:R}}>
+                    {stats.stealthStats.winRate!=null?`${fix0(stats.stealthStats.winRate)}% WR`:"--"}
+                  </div>
+                  <div style={{fontSize:10,color:num(stats.stealthStats.avgPnl)>=0?G:R,marginTop:2}}>
+                    avg {stats.stealthStats.avgPnl!=null?fmt$(stats.stealthStats.avgPnl):"--"}
+                  </div>
+                </div>
+                <div style={{background:"#090f17",borderRadius:8,padding:"8px",textAlign:"center"}}>
+                  <div style={{fontSize:7,color:DIM,marginBottom:4}}>
+                    NORMAL ({(stats.totalTrades||0)-(stats.stealthStats.trades)}t)
+                  </div>
+                  <div style={{fontSize:16,fontWeight:900,color:num(stats.stealthStats.vsNormal?.normalWR)>=50?G:R}}>
+                    {stats.stealthStats.vsNormal?`${fix0(stats.stealthStats.vsNormal.normalWR)}% WR`:"--"}
+                  </div>
+                  <div style={{fontSize:10,color:num(stats.stealthStats.vsNormal?.normalAvg)>=0?G:R,marginTop:2}}>
+                    avg {stats.stealthStats.vsNormal?fmt$(stats.stealthStats.vsNormal.normalAvg):"--"}
+                  </div>
+                </div>
+              </div>
+              <div style={{fontSize:8,color:DIM,textAlign:"center"}}>
+                Need 20+ stealth trades for statistical significance
+              </div>
+            </div>
+          )}
+
           <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"13px"}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:10}}>EXIT PLAYBOOK</div>
             {[
@@ -1078,7 +1193,7 @@ function AppInner({ token, headers, onLogout }) {
           DEBUG — new in v5.1
          ══════════════════════════════════════════════════════ */}
       {view==="debug" && (
-        <div style={{flex:1,padding:"12px 16px",overflowY:"auto"}}>
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2}}>DEBUG — WHY TOKENS ARE REJECTED</div>
             <button className="btn" onClick={fetchDebug}
