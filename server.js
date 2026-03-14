@@ -28,7 +28,7 @@ async function initDB() {
     id SERIAL PRIMARY KEY, ticker TEXT, pair_address TEXT, dex_url TEXT,
     score INTEGER, price NUMERIC, vol_5m NUMERIC, liq NUMERIC, pc_5m NUMERIC,
     boosted BOOLEAN DEFAULT FALSE, entered BOOLEAN DEFAULT FALSE,
-    skip_reason TEXT, market_mood TEXT, age_min NUMERIC DEFAULT 0,
+    skip_reason TEXT, market_mood TEXT,
     seen_at TIMESTAMPTZ DEFAULT NOW())`);
   await query(`CREATE TABLE IF NOT EXISTS trades (
     id SERIAL PRIMARY KEY, ticker TEXT, name TEXT,
@@ -37,11 +37,13 @@ async function initDB() {
     exit_mult NUMERIC, highest_mult NUMERIC DEFAULT 1.0, pnl NUMERIC, exit_reason TEXT,
     vol_5m NUMERIC, vol_1h NUMERIC, liq NUMERIC, pc_5m NUMERIC,
     buys_5m INTEGER, sells_5m INTEGER, boosted BOOLEAN DEFAULT FALSE,
-    market_mood TEXT, age_min NUMERIC DEFAULT 0,
+    market_mood TEXT,
     opened_at TIMESTAMPTZ DEFAULT NOW(), closed_at TIMESTAMPTZ)`);
+  await query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS age_min NUMERIC DEFAULT 0`);
+  await query(`ALTER TABLE trades  ADD COLUMN IF NOT EXISTS age_min NUMERIC DEFAULT 0`);
   await query(`CREATE INDEX IF NOT EXISTS trades_status_idx ON trades(status)`);
   await query(`CREATE INDEX IF NOT EXISTS signals_seen_idx ON signals(seen_at DESC)`);
-  console.log("✅ DB ready");
+  console.log('✅ DB ready');
 }
 
 // ── ENV ────────────────────────────────────────────────────
