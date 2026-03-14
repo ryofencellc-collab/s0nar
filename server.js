@@ -713,7 +713,7 @@ app.get("/api/backtest",async(req,res)=>{
       else if(pc1h>=100){mult=2.0;exit="TIER 1";pnl=(betSize*.30*(2-1))+(betSize*.70*((1+pc1h/100)-1));}
       else if(pc1h>=0){mult=1+pc1h/100;exit="TIME EXIT +";pnl=betSize*(pc1h/100);}
       else{mult=1+pc1h/100;exit=pc1h<=-30?"STOP LOSS":"TIME EXIT -";pnl=betSize*(pc1h/100);if(pc1h<=-30){mult=0.70;pnl=betSize*-0.30;}}
-      const wouldEnter=sc>=dynScore&&liq>=MIN_LIQ&&v5>=MIN_VOL_5M&&bsPct>=MIN_BUY_PCT&&pc5m>-20&&ageMin<=MAX_AGE_MIN;
+      const wouldEnter=sc>=65&&liq>=MIN_LIQ&&v5>=MIN_VOL_5M&&bsPct>=MIN_BUY_PCT&&pc5m>-20;
       results.push({ticker:p.baseToken?.symbol||"???",pairAddr:p.pairAddress,dexUrl:p.url,
         score:sc,betSize,liq:Math.round(liq),vol5m:Math.round(v5),vol1h:Math.round(v1),
         pc5m:parseFloat(pc5m.toFixed(1)),pc1h:parseFloat(pc1h.toFixed(1)),pc24h:parseFloat(pc24h.toFixed(1)),
