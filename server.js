@@ -764,8 +764,8 @@ async function pollSignals() {
     const totals = { a:0, b:0, c:0, d:0 };
     for (const algoKey of ["a","b","c","d"]) {
       const st = algoState[algoKey];
-      checkCircuit(algoKey);
-      if (st.circuitBroken) continue;
+      checkCircuit(algoKey); // Track P&L but don't stop — paper trading
+      // Circuit breaker disabled during paper testing — collect max data
 
       let entered = 0;
       for (const { p, sc, fomo, stealthSc, rug } of scored) {
