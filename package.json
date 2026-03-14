@@ -1,10 +1,10 @@
 {
   "name": "s0nar-backend",
-  "version": "3.0.0",
-  "description": "S0NAR — Iron Dome meme coin signal tracker",
+  "version": "5.3.0",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "cd frontend && npm install && npm run build"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -12,7 +12,26 @@
     "node-fetch": "^2.7.0",
     "pg": "^8.11.3"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "engines": { "node": ">=18.0.0" }
 }
+```
+3. Commit
+
+---
+
+**STEP 8 — Update server.js**
+
+Replace with the new server.js I sent. Commit.
+
+---
+
+**STEP 9 — Update Render build settings**
+
+1. Go to Render → your s0nar service → **Settings**
+2. Find **Build Command** and change it to:
+```
+npm run build && npm install
+```
+3. Find **Start Command** — make sure it says:
+```
+node server.js
