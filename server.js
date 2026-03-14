@@ -1120,7 +1120,7 @@ app.get("*", (req, res) => {
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR FOMO HUNTER v5.1 | Port:${PORT}`);
+  console.log(`\nS0NAR FOMO HUNTER v5.3 | Port:${PORT}`);
   console.log(`DB:${process.env.DATABASE_URL?"connected":"MISSING"} ntfy:${NTFY||"not set"}`);
   console.log(`minScore:${MIN_SCORE} minFOMO:${MIN_FOMO} minLiq:$${MIN_LIQ} minVol:$${MIN_VOL_5M}`);
   console.log(`Tiers:${TIER1}x/${TIER2}x/${TIER3}x maxHold:${MAX_HOLD}m queries:${QUERIES.length}\n`);
