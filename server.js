@@ -1,13 +1,16 @@
 // ============================================================
-//  S0NAR — IRON DOME v5.2  "FOMO HUNTER"
+//  S0NAR — IRON DOME v5.3  "FOMO HUNTER"
 //  Strategy: enter before the crowd, exit into their buying
-//  v5.2 adds: /api/open-pnl live unrealized P&L per position,
-//  warning levels (near_stop, near_tier1, near_tier2, near_trailing)
+//  v5.3: serves frontend as static files (no Netlify needed),
+//        password protection via APP_PASSWORD env var,
+//        session token via signed cookie.
 // ============================================================
 const express  = require("express");
 const cors     = require("cors");
 const fetch    = require("node-fetch");
 const { Pool } = require("pg");
+const path     = require("path");
+const crypto   = require("crypto");
 
 const app = express();
 app.use(cors());
@@ -60,8 +63,55 @@ async function initDB() {
 }
 
 // ── CONFIG ─────────────────────────────────────────────────
-const NTFY  = process.env.NTFY_TOPIC;
-const PORT  = process.env.PORT || 3000;
+const NTFY     = process.env.NTFY_TOPIC;
+const PORT     = process.env.PORT || 3000;
+const APP_PASS = process.env.APP_PASSWORD || "sonar2024"; // Set APP_PASSWORD in Render env vars
+
+// ── AUTH ───────────────────────────────────────────────────
+// Simple token-based auth. Token = sha256(password + secret).
+// Frontend sends token in X-Auth-Token header or as ?token= query param.
+// /api/login exchanges password for token.
+// /health is public (for Render health checks).
+// All other routes require valid token.
+
+const SECRET = process.env.SESSION_SECRET || "sonar-secret-key-change-me";
+
+function makeToken(password) {
+  return crypto.createHmac("sha256", SECRET).update(password).digest("hex");
+}
+
+const VALID_TOKEN = makeToken(APP_PASS);
+
+function authMiddleware(req, res, next) {
+  // Allow health check and login without auth
+  if (req.path === "/health" || req.path === "/api/login") return next();
+  // Allow static assets without auth
+  if (!req.path.startsWith("/api/") && req.path !== "/") return next();
+
+  const token = req.headers["x-auth-token"] || req.query.token;
+  if (token && token === VALID_TOKEN) return next();
+
+  // For API routes return 401
+  if (req.path.startsWith("/api/")) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  // For the root page, serve the app (login handled client-side)
+  next();
+}
+
+app.use(authMiddleware);
+
+// Login endpoint — exchange password for token
+app.post("/api/login", (req, res) => {
+  const { password } = req.body;
+  if (!password) return res.status(400).json({ error: "Password required" });
+  if (password !== APP_PASS) return res.status(401).json({ error: "Wrong password" });
+  res.json({ token: VALID_TOKEN, ok: true });
+});
+
+// Serve built React app from /public (Render will build it here)
+const STATIC_DIR = path.join(__dirname, "dist");
+app.use(express.static(STATIC_DIR));
 
 const MIN_SCORE   = 60;
 const MIN_LIQ     = 2000;
@@ -1058,6 +1108,14 @@ app.get("/api/backtest", async(req, res) => {
   } finally {
     backtestRunning = false;
   }
+});
+
+// Catch-all — serve React app for any non-API route (client-side routing)
+app.get("*", (req, res) => {
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({ error: "Not found" });
+  }
+  res.sendFile(path.join(STATIC_DIR, "index.html"));
 });
 
 // ── START ──────────────────────────────────────────────────
