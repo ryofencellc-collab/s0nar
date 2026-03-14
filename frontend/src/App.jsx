@@ -1131,8 +1131,6 @@ function AppInner({ token, headers, onLogout }) {
             ))}
           </div>
 
-          </div>
-
           {/* Stealth vs Normal comparison in record */}
           {stats?.stealthStats && stats.stealthStats.trades > 0 && (
             <div style={{background:CARD,border:`1px solid ${P}33`,borderRadius:12,padding:"13px",marginBottom:10}}>
