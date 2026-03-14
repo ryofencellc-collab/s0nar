@@ -1,9 +1,8 @@
 // ============================================================
-//  S0NAR — IRON DOME v5.3  "FOMO HUNTER"
+//  S0NAR — IRON DOME v5.4  "FOMO HUNTER"
 //  Strategy: enter before the crowd, exit into their buying
-//  v5.3: serves frontend as static files (no Netlify needed),
-//        password protection via APP_PASSWORD env var,
-//        session token via signed cookie.
+//  v5.4 adds: Stealth Score — detects high-liq quiet setups
+//             before coordinated pumps. Data-proven after 100t.
 // ============================================================
 const express  = require("express");
 const cors     = require("cors");
@@ -53,10 +52,13 @@ async function initDB() {
     `ALTER TABLE signals ADD COLUMN IF NOT EXISTS fomo_score INTEGER DEFAULT 0`,
     `ALTER TABLE trades  ADD COLUMN IF NOT EXISTS age_min    NUMERIC DEFAULT 0`,
     `ALTER TABLE trades  ADD COLUMN IF NOT EXISTS fomo_score INTEGER DEFAULT 0`,
-    `CREATE INDEX IF NOT EXISTS trades_status_idx ON trades(status)`,
-    `CREATE INDEX IF NOT EXISTS trades_opened_idx ON trades(opened_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS signals_seen_idx  ON signals(seen_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS signals_fomo_idx  ON signals(fomo_score DESC)`,
+    `ALTER TABLE trades  ADD COLUMN IF NOT EXISTS stealth_score INTEGER DEFAULT 0`,
+    `ALTER TABLE trades  ADD COLUMN IF NOT EXISTS is_stealth BOOLEAN DEFAULT FALSE`,
+    `CREATE INDEX IF NOT EXISTS trades_status_idx  ON trades(status)`,
+    `CREATE INDEX IF NOT EXISTS trades_opened_idx  ON trades(opened_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS trades_stealth_idx ON trades(is_stealth)`,
+    `CREATE INDEX IF NOT EXISTS signals_seen_idx   ON signals(seen_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS signals_fomo_idx   ON signals(fomo_score DESC)`,
   ];
   for (const m of migrations) await db(m).catch(e => console.warn("migration:", e.message));
   console.log("DB ready v5.1");
@@ -111,7 +113,14 @@ app.post("/api/login", (req, res) => {
 
 // Serve built React app from /public (Render will build it here)
 const STATIC_DIR = path.join(__dirname, "dist");
-app.use(express.static(STATIC_DIR));
+const fs = require("fs");
+const hasDist = fs.existsSync(path.join(STATIC_DIR, "index.html"));
+if (hasDist) {
+  app.use(express.static(STATIC_DIR));
+  console.log("Serving frontend from dist/");
+} else {
+  console.log("No dist/ folder — frontend served separately (Netlify/Vercel)");
+}
 
 const MIN_SCORE   = 60;
 const MIN_LIQ     = 2000;
@@ -403,7 +412,7 @@ function rugCheck(p) {
 
 // ── BET SIZING ─────────────────────────────────────────────
 // FIX: minimum floor raised. sc<70 = $25 base * 0.9 min = $25 (rounds up)
-function betSize(sc, fomo) {
+function betSize(sc, fomo, isstealth = false) {
   const base = sc >= 85 ? 100
              : sc >= 80 ?  75
              : sc >= 75 ?  60
@@ -416,7 +425,88 @@ function betSize(sc, fomo) {
                  : fomo >= 35 ? 1.0
                  :              0.9;
 
-  return Math.min(150, Math.max(25, Math.round((base * fomoMult) / 5) * 5));
+  // Stealth multiplier — 1.5x for high-liq quiet setups
+  // Based on BGOLD pattern: high liq + flat price = coordinated pump setup
+  const stealthMult = isstealth ? 1.5 : 1.0;
+
+  return Math.min(150, Math.max(25, Math.round((base * fomoMult * stealthMult) / 5) * 5));
+}
+
+// ── STEALTH SCORE ──────────────────────────────────────────
+// Detects high-liquidity quiet setups before coordinated pumps.
+// Pattern discovered from BGOLD: $133k liq, flat price, low FOMO
+// = someone loaded the gun, we want to be in before they fire.
+// Score 0-100. is_stealth = true when score >= 60.
+function calcStealthScore(p) {
+  const liq  = p.liquidity?.usd || 0;
+  const pc5  = parseFloat(p.priceChange?.m5 || 0);
+  const pc1  = parseFloat(p.priceChange?.h1 || 0);
+  const age  = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : 999;
+  const b    = p.txns?.m5?.buys  || 0;
+  const s    = p.txns?.m5?.sells || 0;
+  const v5   = p.volume?.m5 || 0;
+  const v1   = p.volume?.h1 || 0.001;
+  const fomo = calcFomoScore(p);
+  const bst  = (p.boosts?.active || 0) > 0;
+
+  let st = 0;
+
+  // 1. High liquidity — the core signal (up to 40pts)
+  // Real money behind the token = someone serious is in this
+  if      (liq >= 200000) st += 40;
+  else if (liq >= 100000) st += 35;
+  else if (liq >= 50000)  st += 25;
+  else if (liq >= 20000)  st += 12;
+  else if (liq >= 10000)  st +=  5;
+  else                    st -=  10; // Low liq = not stealth
+
+  // 2. Price is quiet — not pumping yet (up to 20pts)
+  // We want flat-to-slightly-up, NOT already running
+  if      (pc5 >= -3  && pc5 <= 5)  st += 20; // Dead quiet — best
+  else if (pc5 >= -5  && pc5 <= 10) st += 12; // Slight move
+  else if (pc5 >= -10 && pc5 <= 20) st +=  5; // Moving but ok
+  else if (pc5 >  20)               st -= 15; // Already pumping — too late
+  else if (pc5 < -10)               st -= 10; // Dumping
+
+  // 3. FOMO is LOW — crowd not there yet (up to 20pts)
+  // If FOMO is high, crowd is already there = not stealth
+  if      (fomo >= 15 && fomo <= 35) st += 20; // Sweet spot
+  else if (fomo >= 35 && fomo <= 50) st += 10; // Still ok
+  else if (fomo >  50 && fomo <= 65) st +=  3; // Getting crowded
+  else if (fomo >  65)               st -= 15; // Too crowded = not stealth
+  else if (fomo <  15)               st +=  5; // Very quiet
+
+  // 4. Survived the rug window — age matters (up to 15pts)
+  if      (age >= 20  && age <= 60)  st += 15; // Prime stealth window
+  else if (age >= 60  && age <= 120) st += 10; // Still valid
+  else if (age >= 120 && age <= 180) st +=  5; // Getting older
+  else if (age <  20)                st -=  5; // Too new
+  else if (age >  180)               st -= 10; // Too old
+
+  // 5. Steady buy pressure — accumulation pattern (up to 10pts)
+  const total = b + s;
+  if (total > 5) {
+    const br = b / total;
+    if      (br >= 0.52 && br <= 0.68) st += 10; // Steady — not explosive
+    else if (br >= 0.68 && br <= 0.80) st +=  5; // Strong but ok
+    else if (br >  0.80)               st -=  5; // Too one-sided = wash
+    else if (br <  0.52)               st -=  5; // Sell pressure
+  }
+
+  // 6. Volume is LOW relative to liquidity — quiet accumulation
+  // High vol/liq ratio = already being traded heavily = not stealth
+  if (liq > 0 && v5 > 0) {
+    const vlr = v5 / liq;
+    if      (vlr < 0.1)               st += 5;  // Very quiet
+    else if (vlr < 0.3)               st += 2;  // Quiet
+    else if (vlr > 1.0)               st -= 5;  // Too active
+  }
+
+  // 7. No boost — organic, not paid promotion
+  // Boosted tokens are already being promoted = crowd incoming
+  if (bst) st -= 8;
+
+  return Math.round(Math.max(0, Math.min(100, st)));
 }
 
 // ── PNL CALC ───────────────────────────────────────────────
@@ -556,39 +646,48 @@ async function hadTrade(addr) {
 }
 
 async function insertTrade(p, sc, fomo) {
-  const bet = betSize(sc, fomo);
-  const age = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : 0;
-  // Columns: 20 total, VALUES: 7 explicit + 2 literals (OPEN, 1.0) + 10 params + NOW() = verified
+  const stealthSc = calcStealthScore(p);
+  const isStealth = stealthSc >= 60;
+  const bet       = betSize(sc, fomo, isStealth);
+  const age       = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : 0;
+
+  // Columns: 22 total — verified below
   const r = await db(`
     INSERT INTO trades
       (ticker, name, pair_address, dex_url, score, entry_price, bet_size,
        status, highest_mult,
        vol_5m, vol_1h, liq, pc_5m, buys_5m, sells_5m,
-       boosted, market_mood, age_min, fomo_score, opened_at)
+       boosted, market_mood, age_min, fomo_score,
+       stealth_score, is_stealth,
+       opened_at)
     VALUES
       ($1, $2, $3, $4, $5, $6, $7,
        'OPEN', 1.0,
        $8, $9, $10, $11, $12, $13,
-       $14, $15, $16, $17, NOW())
+       $14, $15, $16, $17,
+       $18, $19,
+       NOW())
     RETURNING *`,
     [
-      p.baseToken?.symbol || "???",       // $1
-      p.baseToken?.name   || "",          // $2
-      p.pairAddress,                      // $3
-      p.url,                              // $4
-      sc,                                 // $5
-      parseFloat(p.priceUsd),             // $6
-      bet,                                // $7
-      p.volume?.m5     || 0,              // $8
-      p.volume?.h1     || 0,              // $9
-      p.liquidity?.usd || 0,              // $10
-      parseFloat(p.priceChange?.m5 || 0), // $11
-      p.txns?.m5?.buys  || 0,             // $12
-      p.txns?.m5?.sells || 0,             // $13
-      (p.boosts?.active || 0) > 0,        // $14
-      mood,                               // $15
-      parseFloat(age.toFixed(1)),         // $16
-      fomo,                               // $17
+      p.baseToken?.symbol || "???",        // $1
+      p.baseToken?.name   || "",           // $2
+      p.pairAddress,                       // $3
+      p.url,                               // $4
+      sc,                                  // $5
+      parseFloat(p.priceUsd),              // $6
+      bet,                                 // $7
+      p.volume?.m5     || 0,               // $8
+      p.volume?.h1     || 0,               // $9
+      p.liquidity?.usd || 0,               // $10
+      parseFloat(p.priceChange?.m5 || 0),  // $11
+      p.txns?.m5?.buys  || 0,              // $12
+      p.txns?.m5?.sells || 0,              // $13
+      (p.boosts?.active || 0) > 0,         // $14
+      mood,                                // $15
+      parseFloat(age.toFixed(1)),          // $16
+      fomo,                                // $17
+      stealthSc,                           // $18
+      isStealth,                           // $19
     ]
   );
   return r.rows[0];
@@ -695,20 +794,21 @@ async function pollSignals() {
 
       if (trade) {
         entered++;
-        const liq = p.liquidity?.usd || 0;
-        const bp  = Math.round(
+        const liq       = p.liquidity?.usd || 0;
+        const bp        = Math.round(
           (p.txns?.m5?.buys || 0) /
           Math.max((p.txns?.m5?.buys || 0) + (p.txns?.m5?.sells || 0), 1) * 100
         );
-        const age = p.pairCreatedAt
+        const age       = p.pairCreatedAt
           ? ((Date.now() - p.pairCreatedAt) / 60000).toFixed(0)
           : "?";
-        const pc5 = parseFloat(p.priceChange?.m5 || 0).toFixed(0);
-        console.log(`  ENTERED ${p.baseToken?.symbol} sc:${sc} fomo:${fomo} bet:$${trade.bet_size} age:${age}m pc5:${pc5}%`);
+        const pc5       = parseFloat(p.priceChange?.m5 || 0).toFixed(0);
+        const stTag     = trade.is_stealth ? " [STEALTH]" : "";
+        console.log(`  ENTERED${stTag} ${p.baseToken?.symbol} sc:${sc} fomo:${fomo} stealth:${trade.stealth_score} bet:$${trade.bet_size} age:${age}m pc5:${pc5}%`);
         await notify(
-          `ENTRY: ${p.baseToken?.symbol}`,
-          `Score:${sc} FOMO:${fomo} | Bet:$${trade.bet_size} | Age:${age}m | ${pc5}% 5m | Liq:$${Math.round(liq).toLocaleString()} | Buys:${bp}%`,
-          "high"
+          `${trade.is_stealth ? "STEALTH" : "ENTRY"}: ${p.baseToken?.symbol}`,
+          `Score:${sc} FOMO:${fomo} Stealth:${trade.stealth_score} | Bet:$${trade.bet_size} | Age:${age}m | ${pc5}% 5m | Liq:$${Math.round(liq).toLocaleString()} | Buys:${bp}%`,
+          trade.is_stealth ? "urgent" : "high"
         );
       }
     }
@@ -892,8 +992,9 @@ app.get("/api/stats", async(req, res) => {
       return out;
     };
 
-    const scoreBkts = {"<65":[],"65-69":[],"70-74":[],"75-79":[],"80-84":[],"85+":[]};
-    const fomoBkts  = {"0-19":[],"20-39":[],"40-59":[],"60-79":[],"80+":[]};
+    const scoreBkts   = {"<65":[],"65-69":[],"70-74":[],"75-79":[],"80-84":[],"85+":[]};
+    const fomoBkts    = {"0-19":[],"20-39":[],"40-59":[],"60-79":[],"80+":[]};
+    const stealthBkts = {"stealth":[],"non-stealth":[]};
 
     closed.forEach(t => {
       const pnl = parseFloat(t.pnl || 0);
@@ -901,7 +1002,19 @@ app.get("/api/stats", async(req, res) => {
       const fk  = parseInt(t.fomo_score||0)>=80?"80+":parseInt(t.fomo_score||0)>=60?"60-79":parseInt(t.fomo_score||0)>=40?"40-59":parseInt(t.fomo_score||0)>=20?"20-39":"0-19";
       scoreBkts[sk].push(pnl);
       fomoBkts[fk].push(pnl);
+      stealthBkts[t.is_stealth?"stealth":"non-stealth"].push(pnl);
     });
+
+    // Stealth summary stats
+    const stealthTrades    = closed.filter(t => t.is_stealth);
+    const nonStealthTrades = closed.filter(t => !t.is_stealth);
+    const stealthWins      = stealthTrades.filter(t => parseFloat(t.pnl||0) > 0);
+    const stealthWR        = stealthTrades.length ? (stealthWins.length/stealthTrades.length)*100 : 0;
+    const stealthAvgPnl    = stealthTrades.length ? stealthTrades.reduce((a,t)=>a+parseFloat(t.pnl||0),0)/stealthTrades.length : 0;
+    const stealthTotalPnl  = stealthTrades.reduce((a,t)=>a+parseFloat(t.pnl||0),0);
+    const bestStealth      = stealthTrades.length
+      ? stealthTrades.reduce((a,b)=>parseFloat(a.pnl||0)>parseFloat(b.pnl||0)?a:b, stealthTrades[0])
+      : null;
 
     const ord = [...closed].sort((a,b)=>new Date(a.closed_at)-new Date(b.closed_at));
     let run = 1000;
@@ -924,11 +1037,25 @@ app.get("/api/stats", async(req, res) => {
       totalTrades:closed.length, openTrades:open.length,
       best:best?{ticker:best.ticker,pnl:+parseFloat(best.pnl||0).toFixed(2),mult:+parseFloat(best.exit_mult||0).toFixed(2)}:null,
       buckets:mkBkt(scoreBkts), fomoBuckets:mkBkt(fomoBkts),
+      stealthBuckets:mkBkt(stealthBkts),
+      stealthStats:{
+        trades:   stealthTrades.length,
+        winRate:  stealthTrades.length ? +stealthWR.toFixed(1) : null,
+        avgPnl:   stealthTrades.length ? +stealthAvgPnl.toFixed(2) : null,
+        totalPnl: +stealthTotalPnl.toFixed(2),
+        best:     bestStealth ? {ticker:bestStealth.ticker,pnl:+parseFloat(bestStealth.pnl||0).toFixed(2),mult:+parseFloat(bestStealth.exit_mult||0).toFixed(2)} : null,
+        vsNormal: nonStealthTrades.length && stealthTrades.length ? {
+          stealthWR:  +stealthWR.toFixed(1),
+          normalWR:   +(nonStealthTrades.filter(t=>parseFloat(t.pnl||0)>0).length/nonStealthTrades.length*100).toFixed(1),
+          stealthAvg: +stealthAvgPnl.toFixed(2),
+          normalAvg:  +(nonStealthTrades.reduce((a,t)=>a+parseFloat(t.pnl||0),0)/nonStealthTrades.length).toFixed(2),
+        } : null,
+      },
       equity, daily, exits,
       ironDome:{
         marketMood:mood, dynamicMinScore:dynScore, circuitBroken,
         dailyPnl:+dailyPnl.toFixed(2), selfTuneCount:tuneCount, pollCount,
-        version:"5.2",
+        version:"5.4",
         config:{ MIN_SCORE,MIN_FOMO,MIN_LIQ,TIER1,TIER2,TIER3,MAX_HOLD },
       },
     });
@@ -1110,17 +1237,20 @@ app.get("/api/backtest", async(req, res) => {
   }
 });
 
-// Catch-all — serve React app for any non-API route (client-side routing)
+// Catch-all — only serve index.html if dist exists
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) {
     return res.status(404).json({ error: "Not found" });
   }
-  res.sendFile(path.join(STATIC_DIR, "index.html"));
+  if (hasDist) {
+    return res.sendFile(path.join(STATIC_DIR, "index.html"));
+  }
+  res.status(200).send("S0NAR backend running. Frontend served separately.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR FOMO HUNTER v5.3 | Port:${PORT}`);
+  console.log(`\nS0NAR FOMO HUNTER v5.1 | Port:${PORT}`);
   console.log(`DB:${process.env.DATABASE_URL?"connected":"MISSING"} ntfy:${NTFY||"not set"}`);
   console.log(`minScore:${MIN_SCORE} minFOMO:${MIN_FOMO} minLiq:$${MIN_LIQ} minVol:$${MIN_VOL_5M}`);
   console.log(`Tiers:${TIER1}x/${TIER2}x/${TIER3}x maxHold:${MAX_HOLD}m queries:${QUERIES.length}\n`);
