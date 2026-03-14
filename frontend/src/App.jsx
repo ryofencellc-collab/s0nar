@@ -28,7 +28,11 @@ const num   = v => { const n=parseFloat(v); return isNaN(n)?0:n; };
 const fix2  = v => num(v).toFixed(2);
 const fix1  = v => num(v).toFixed(1);
 const fix0  = v => Math.round(num(v)).toString();
-const fmt$  = (v,sign=true) => (sign&&num(v)>0?"+":"")+"$"+Math.abs(num(v)).toFixed(2);
+const fmt$  = (v,sign=true) => {
+  const n = num(v);
+  const prefix = sign && n > 0 ? "+" : n < 0 ? "-" : "";
+  return prefix + "$" + Math.abs(n).toFixed(2);
+};
 const fmtK  = v => num(v)>=1e6?(num(v)/1e6).toFixed(1)+"M":num(v)>=1e3?(num(v)/1e3).toFixed(1)+"K":Math.round(num(v)).toString();
 const sc2c  = s => num(s)>=85?G:num(s)>=75?Y:num(s)>=65?O:R;
 const fomo2c = f => num(f)>=75?R:num(f)>=55?O:num(f)>=35?Y:num(f)>=20?"#64ffda":DIM;
@@ -42,7 +46,7 @@ function Bar({ v=0, c=G, max=100 }) {
   );
 }
 
-function EqChart({ data=[], color=G }) {
+function EqChart({ data=[], color=G, id="" }) {
   const safe = (data||[]).map(v=>num(v));
   if (safe.length < 2) return (
     <div style={{height:50,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:DIM}}>
@@ -51,16 +55,17 @@ function EqChart({ data=[], color=G }) {
   );
   const min=Math.min(...safe), max=Math.max(...safe), range=max-min||1;
   const W=280, H=50;
+  const gradId = `eg-${color.replace("#","")}-${id}`;
   const pts = safe.map((v,i)=>`${(i/(safe.length-1))*W},${H-((v-min)/range)*(H-6)-3}`).join(" ");
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:H}} preserveAspectRatio="none">
       <defs>
-        <linearGradient id={`eg-${color.replace("#","")}`} x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity=".3"/>
           <stop offset="100%" stopColor={color} stopOpacity=".02"/>
         </linearGradient>
       </defs>
-      <polygon points={`0,${H} ${pts} ${W},${H}`} fill={`url(#eg-${color.replace("#","")})`}/>
+      <polygon points={`0,${H} ${pts} ${W},${H}`} fill={`url(#${gradId})`}/>
       <polyline points={pts} fill="none" stroke={color} strokeWidth={1.5}/>
     </svg>
   );
@@ -167,7 +172,7 @@ function AlgoCard({ stat, isSelected, onClick }) {
         </div>
       </div>
 
-      <EqChart data={stat.equity||[]} color={c}/>
+      <EqChart data={stat.equity||[]} color={c} id={stat.algo}/>
 
       <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:7,color:DIM}}>
         <span style={{color:num(stat.winRate)>=50?G:Y}}>{stat.winRate!=null?`${fix0(stat.winRate)}% WR`:"--"}</span>
@@ -399,7 +404,7 @@ function AppInner({ token, headers, onLogout }) {
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
                 {[
                   {l:"TOTAL TRADES", v:stats.reduce((a,s)=>a+s.totalTrades,0), c:"white"},
-                  {l:"TOTAL P&L",    v:fmt$(stats.reduce((a,s)=>a+num(s.totalPnl),0)), c:G},
+                  {l:"TOTAL P&L",    v:fmt$(stats.reduce((a,s)=>a+num(s.totalPnl),0)), c:stats.reduce((a,s)=>a+num(s.totalPnl),0)>=0?G:R},
                   {l:"OPEN NOW",     v:stats.reduce((a,s)=>a+s.openTrades,0), c:Y},
                 ].map(s=>(
                   <div key={s.l} style={{textAlign:"center"}}>
@@ -442,7 +447,7 @@ function AppInner({ token, headers, onLogout }) {
                   <div style={{fontSize:8,color:DIM}}>{selStat.totalTrades}t · {selStat.openTrades} open</div>
                 </div>
               </div>
-              <EqChart data={selStat.equity||[]} color={ALGO_COLORS[selAlgo]}/>
+              <EqChart data={selStat.equity||[]} color={ALGO_COLORS[selAlgo]} id={`sel-${selAlgo}`}/>
               <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:7,color:DIM}}>
                 <span>$1,000 start</span>
                 <span style={{color:ALGO_COLORS[selAlgo]}}>
@@ -513,8 +518,8 @@ function AppInner({ token, headers, onLogout }) {
                             </div>
                           </div>
                         </div>
-                        {/* Tier progress */}
-                        {(() => {
+                        {/* Tier progress — only render when we have a valid mult */}
+                        {curMult && curMult > 0 && (() => {
                           const next = curMult<TIER1?TIER1:curMult<TIER2?TIER2:TIER3;
                           const prev = curMult<TIER1?1.0:curMult<TIER2?TIER1:TIER2;
                           const prog = Math.min(100,Math.max(0,((curMult-prev)/(next-prev))*100));
