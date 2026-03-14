@@ -625,7 +625,8 @@ async function getOpen(algoKey) {
 }
 
 async function hadTrade(algoKey, addr) {
-  return (await db(`SELECT id FROM trades_${algoKey} WHERE pair_address=$1 LIMIT 1`, [addr])).rows.length > 0;
+  // Only block if trade is currently OPEN — allow re-entry after close/delist
+  return (await db(`SELECT id FROM trades_${algoKey} WHERE pair_address=$1 AND status='OPEN' LIMIT 1`, [addr])).rows.length > 0;
 }
 
 async function insertTrade(algoKey, p, sc, fomo) {
@@ -769,6 +770,7 @@ async function pollSignals() {
 
       let entered = 0;
       for (const { p, sc, fomo, stealthSc, rug } of scored) {
+        if (sc < 45 || (p.liquidity?.usd || 0) < 300) continue; // Skip junk before logging
         const gate = algoGate(p, sc, fomo, algoKey);
         await logSig(algoKey, p, sc, fomo, stealthSc, gate, rug);
 
@@ -818,12 +820,11 @@ async function checkPositions() {
           if (!pair) {
             const ageMin = (Date.now() - new Date(t.opened_at).getTime()) / 60000;
             if (ageMin > 3) {
-              const lossPct = ageMin < 5 ? 0.30 : ageMin < 15 ? 0.40 : 0.50;
-              const mult    = 1 - lossPct;
-              const pnl     = +(parseFloat(t.bet_size) * -lossPct).toFixed(2);
-              await closeTrade(algoKey, t.id, { mult, pnl, exit:"DELISTED", highMult:parseFloat(t.highest_mult||1) });
+              // Real world: liquidity pulled = full loss
+              const pnl = +(parseFloat(t.bet_size) * -1.0).toFixed(2);
+              await closeTrade(algoKey, t.id, { mult:0, pnl, exit:"DELISTED", highMult:parseFloat(t.highest_mult||1) });
               st.dailyPnl += pnl;
-              console.log(`  [${algoKey.toUpperCase()}] DELISTED ${t.ticker} -${(lossPct*100).toFixed(0)}%`);
+              console.log(`  [${algoKey.toUpperCase()}] DELISTED ${t.ticker} -100% -$${Math.abs(pnl)}`);
             }
             continue;
           }
