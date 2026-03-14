@@ -14,24 +14,3 @@
   },
   "engines": { "node": ">=18.0.0" }
 }
-```
-3. Commit
-
----
-
-**STEP 8 — Update server.js**
-
-Replace with the new server.js I sent. Commit.
-
----
-
-**STEP 9 — Update Render build settings**
-
-1. Go to Render → your s0nar service → **Settings**
-2. Find **Build Command** and change it to:
-```
-npm run build && npm install
-```
-3. Find **Start Command** — make sure it says:
-```
-node server.js
