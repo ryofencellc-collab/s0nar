@@ -50,4 +50,4 @@ services:
 
 databases:
   - name: s0nar-db
-    plan: basic  # Changed from starter to
+    plan: free  # Zero cost option
