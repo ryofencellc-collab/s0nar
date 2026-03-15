@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — IRON DOME v6.0  "LAB"
+//  S0NAR — IRON DOME v6.1  "LAB"
 //  4-algorithm A/B test to find the optimal entry profile
 //  A: BGOLD Hunter  B: Momentum  C: Early Mover  D: Control
 //  NTFY disabled. Clean slate. Data-driven.
@@ -64,15 +64,19 @@ const SIGNAL_COLS = `
 `;
 
 async function initDB() {
-  // Create one table per algorithm
+  // Create one table per algorithm — using IF NOT EXISTS so safe to re-run
   for (const algo of ["a","b","c","d"]) {
     await db(`CREATE TABLE IF NOT EXISTS trades_${algo} (${TRADE_COLS})`);
     await db(`CREATE TABLE IF NOT EXISTS signals_${algo} (${SIGNAL_COLS})`);
     await db(`CREATE INDEX IF NOT EXISTS trades_${algo}_status ON trades_${algo}(status)`);
     await db(`CREATE INDEX IF NOT EXISTS trades_${algo}_opened ON trades_${algo}(opened_at DESC)`);
+    await db(`CREATE INDEX IF NOT EXISTS trades_${algo}_ticker ON trades_${algo}(ticker, opened_at DESC)`);
     await db(`CREATE INDEX IF NOT EXISTS signals_${algo}_seen  ON signals_${algo}(seen_at DESC)`);
+    // Verify table exists and is separate
+    const count = await db(`SELECT COUNT(*) FROM trades_${algo}`);
+    console.log(`  trades_${algo}: ${count.rows[0].count} rows`);
   }
-  console.log("DB ready v6.0 — 4 algo tables created");
+  console.log("DB ready v6.1 — 4 separate algo tables verified");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -127,7 +131,7 @@ const ALGOS = {
     maxScore:   80,   // Cap score — high score + high FOMO = bad
     minFomo:    15,
     maxFomo:    45,   // Low FOMO only — crowd not there yet
-    minLiq:     50000, // High liq — real money behind it
+    minLiq:     30000, // Lowered from $50k — MOLLY hit 3334x with $33k liq
     minVol5m:   200,
     minBuyPct:  50,
     minAge:     20,
@@ -608,11 +612,16 @@ async function updateMood() {
 
 async function refreshDaily() {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    // Use America/New_York midnight — app is used from NYC
+    const now     = new Date();
+    const nyDate  = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+    nyDate.setHours(0, 0, 0, 0);
+    const startOfDay = new Date(now.getTime() - (now - nyDate));
+
     for (const algoKey of ["a","b","c","d"]) {
       const r = await db(
         `SELECT COALESCE(SUM(pnl),0) AS t FROM trades_${algoKey} WHERE status='CLOSED' AND closed_at >= $1`,
-        [`${today}T00:00:00Z`]
+        [startOfDay.toISOString()]
       );
       algoState[algoKey].dailyPnl = parseFloat(r.rows[0].t);
     }
@@ -624,9 +633,39 @@ async function getOpen(algoKey) {
   return (await db(`SELECT * FROM trades_${algoKey} WHERE status='OPEN' ORDER BY opened_at DESC`)).rows;
 }
 
-async function hadTrade(algoKey, addr) {
-  // Only block if trade is currently OPEN — allow re-entry after close/delist
-  return (await db(`SELECT id FROM trades_${algoKey} WHERE pair_address=$1 AND status='OPEN' LIMIT 1`, [addr])).rows.length > 0;
+async function hadTrade(algoKey, addr, ticker, name) {
+  // 1. Block if same pair address is currently OPEN
+  const openCheck = await db(
+    `SELECT id FROM trades_${algoKey} WHERE pair_address=$1 AND status='OPEN' LIMIT 1`,
+    [addr]
+  );
+  if (openCheck.rows.length > 0) return true;
+
+  // 2. Block if same TICKER traded in last 90 minutes
+  // Prevents re-entering tokens that delist and reappear with new pair address
+  const tickerCheck = await db(
+    `SELECT id FROM trades_${algoKey}
+     WHERE LOWER(ticker)=LOWER($1)
+     AND opened_at > NOW() - INTERVAL '90 minutes'
+     LIMIT 1`,
+    [ticker]
+  );
+  if (tickerCheck.rows.length > 0) return true;
+
+  // 3. Block if same TOKEN NAME traded in last 90 minutes
+  // Catches MOLLY / MOLLY🔥 / MOLLY variants with different ticker symbols
+  if (name && name.length > 3) {
+    const nameCheck = await db(
+      `SELECT id FROM trades_${algoKey}
+       WHERE LOWER(name)=LOWER($1)
+       AND opened_at > NOW() - INTERVAL '90 minutes'
+       LIMIT 1`,
+      [name]
+    );
+    if (nameCheck.rows.length > 0) return true;
+  }
+
+  return false;
 }
 
 async function insertTrade(algoKey, p, sc, fomo) {
@@ -775,7 +814,7 @@ async function pollSignals() {
         await logSig(algoKey, p, sc, fomo, stealthSc, gate, rug);
 
         if (!gate.pass || !rug.pass) continue;
-        if (await hadTrade(algoKey, p.pairAddress)) continue;
+        if (await hadTrade(algoKey, p.pairAddress, p.baseToken?.symbol || "???", p.baseToken?.name || "")) continue;
 
         const trade = await insertTrade(algoKey, p, sc, fomo).catch(e => {
           const msg = e.message.toLowerCase();
@@ -878,11 +917,28 @@ async function checkPositions() {
   }
 }
 
+// ── SIGNALS CLEANUP (runs every 6 hours) ──────────────────
+async function cleanupSignals() {
+  try {
+    for (const algoKey of ["a","b","c","d"]) {
+      const r = await db(
+        `DELETE FROM signals_${algoKey} WHERE seen_at < NOW() - INTERVAL '24 hours'`
+      );
+      if (r.rowCount > 0) console.log(`[CLEANUP] signals_${algoKey}: deleted ${r.rowCount} old rows`);
+    }
+  } catch(e) { console.error("cleanupSignals:", e.message); }
+}
+
 // ── STATS HELPER ───────────────────────────────────────────
 async function getAlgoStats(algoKey) {
-  const all    = (await db(`SELECT * FROM trades_${algoKey}`)).rows;
-  const closed = all.filter(t => t.status === "CLOSED");
-  const open   = all.filter(t => t.status === "OPEN");
+  // Use aggregation queries instead of loading all rows into memory
+  const [closedRows, openRows] = await Promise.all([
+    db(`SELECT pnl, exit_reason, closed_at, opened_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ORDER BY closed_at ASC`),
+    db(`SELECT id FROM trades_${algoKey} WHERE status='OPEN'`),
+  ]);
+
+  const closed = closedRows.rows;
+  const open   = openRows.rows;
   const wins   = closed.filter(t => parseFloat(t.pnl || 0) > 0);
   const losses = closed.filter(t => parseFloat(t.pnl || 0) <= 0);
   const tp     = closed.reduce((a, t) => a + parseFloat(t.pnl || 0), 0);
@@ -925,7 +981,7 @@ async function getAlgoStats(algoKey) {
 app.get("/health", (req, res) => res.json({
   status: "ok",
   ts: new Date().toISOString(),
-  version: "6.0",
+  version: "6.1",
   marketMood: mood,
   pollCount,
   ntfy: "DISABLED",
@@ -937,13 +993,6 @@ app.get("/health", (req, res) => res.json({
     }])
   ),
 }));
-
-app.post("/api/login", (req, res) => {
-  const { password } = req.body;
-  if (!password) return res.status(400).json({ error: "Password required" });
-  if (password !== APP_PASS) return res.status(401).json({ error: "Wrong password" });
-  res.json({ token: VALID_TOKEN, ok: true });
-});
 
 // All 4 algo stats in one call
 app.get("/api/stats", async(req, res) => {
@@ -1084,12 +1133,12 @@ app.post("/api/wipe", async(req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR v6.0 backend running.");
+  res.status(200).send("S0NAR v6.1 backend running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR LAB v6.0 | Port:${PORT}`);
+  console.log(`\nS0NAR LAB v6.1 | Port:${PORT}`);
   console.log(`DB:${process.env.DATABASE_URL?"connected":"MISSING"}`);
   console.log(`NTFY: DISABLED during A/B test`);
   console.log(`Algos: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name}`);
@@ -1104,4 +1153,5 @@ app.listen(PORT, async () => {
   setInterval(checkPositions, CHECK_MS);
   setInterval(updateMood,     5 * 60 * 1000);
   setInterval(refreshDaily,   2 * 60 * 1000);
+  setInterval(cleanupSignals, 6 * 60 * 60 * 1000); // Clean old signals every 6h
 });
