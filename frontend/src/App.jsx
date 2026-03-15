@@ -1,5 +1,5 @@
-// S0NAR App.jsx v6.0 — 4-Algorithm A/B Testing Lab
-import { useState, useEffect } from "react";
+// S0NAR App.jsx v6.1 — 4-Algorithm A/B Testing Lab
+import React, { useState, useEffect } from "react";
 
 // ── CONSTANTS ──────────────────────────────────────────────
 const TIER1 = 1.5, TIER2 = 3.0, TIER3 = 6.0, MAX_HOLD = 120;
@@ -71,22 +71,14 @@ function EqChart({ data=[], color=G, id="" }) {
   );
 }
 
-function MiniRing({ s=0, size=36 }) {
-  const sc=Math.round(num(s)), c=sc2c(sc), r=size/2-4;
-  const circ=2*Math.PI*r, fill=(sc/100)*circ;
-  return (
-    <div style={{position:"relative",width:size,height:size,flexShrink:0}}>
-      <svg width={size} height={size} style={{transform:"rotate(-90deg)",position:"absolute"}}>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#0c1820" strokeWidth={3}/>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={c} strokeWidth={3}
-          strokeDasharray={`${fill} ${circ}`} strokeLinecap="round"/>
-      </svg>
-      <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-        <span style={{color:c,fontSize:size/3.5,fontWeight:900,fontFamily:"monospace"}}>{sc}</span>
-      </div>
-    </div>
-  );
-}
+// ── ALGO DESCRIPTIONS ─────────────────────────────────────
+// Must be defined before AppInner uses it
+const ALGOS_DESC = {
+  a: "Low FOMO (15-45) + liq $30k+ + quiet price (-5% to +15%). The BGOLD pattern.",
+  b: "Confirms move starting. FOMO 40-70, price +10-40%, moderate liq. Enter on confirmation.",
+  c: "Ultra early — first 15 minutes only. Higher risk, potentially much higher reward.",
+  d: "Current v5.5 system unchanged. Control group for comparison.",
+};
 
 // ── LOGIN SCREEN ───────────────────────────────────────────
 function LoginScreen({ onLogin }) {
@@ -119,7 +111,7 @@ function LoginScreen({ onLogin }) {
       justifyContent:"center",fontFamily:"'Courier New',monospace"}}>
       <div style={{width:300,textAlign:"center",padding:"0 20px"}}>
         <div style={{fontSize:26,fontWeight:900,letterSpacing:4,color:G,marginBottom:6}}>◉ S0NAR</div>
-        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>IRON DOME v6.0</div>
+        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>IRON DOME v6.1</div>
         <div style={{fontSize:8,color:ALGO_COLORS.a,marginBottom:30}}>4-ALGORITHM LAB</div>
 
         <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"20px"}}>
@@ -261,16 +253,24 @@ function AppInner({ token, headers, onLogout }) {
     } catch { setWipeMsg("Server error"); }
   }
 
+  // useRef so the interval always reads the latest selAlgo without stale closure
+  const selAlgoRef = React.useRef(selAlgo);
+  selAlgoRef.current = selAlgo;
+
   useEffect(() => {
     fetchAll();
-    const id1 = setInterval(fetchAll,    15000);
-    const id2 = setInterval(fetchOpenPnl, 8000);
-    return () => { clearInterval(id1); clearInterval(id2); };
+    fetchTrades(selAlgo);
+    fetchOpenPnl();
+    const id1 = setInterval(fetchAll,     15000);
+    const id2 = setInterval(fetchOpenPnl,  8000);
+    const id3 = setInterval(()=>fetchTrades(selAlgoRef.current), 15000);
+    return () => { clearInterval(id1); clearInterval(id2); clearInterval(id3); };
   }, []);
 
   useEffect(() => {
     fetchTrades(selAlgo);
     fetchOpenPnl();
+    setDebugData(null); // Clear stale debug data when switching algo
   }, [selAlgo]);
 
   // Derived
@@ -325,7 +325,7 @@ function AppInner({ token, headers, onLogout }) {
           </div>
           <div style={{textAlign:"right",flexShrink:0,paddingLeft:8}}>
             <div style={{fontSize:7,color:DIM}}>4-ALGO TEST</div>
-            <div style={{fontSize:10,fontWeight:900,color:G}}>v6.0</div>
+            <div style={{fontSize:10,fontWeight:900,color:G}}>v6.1</div>
             <button onClick={onLogout}
               style={{fontSize:6,color:DIM,background:"transparent",border:"none",cursor:"pointer",letterSpacing:1}}>
               LOCK
@@ -816,7 +816,7 @@ function AppInner({ token, headers, onLogout }) {
           {/* Version info */}
           <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px"}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:6}}>VERSION</div>
-            <div style={{fontSize:9,color:"white"}}>S0NAR Iron Dome v6.0 — LAB</div>
+            <div style={{fontSize:9,color:"white"}}>S0NAR Iron Dome v6.1 — LAB</div>
             <div style={{fontSize:8,color:DIM,marginTop:4}}>Poll: 15s · Check: 30s · 42 queries</div>
             <div style={{fontSize:8,color:DIM,marginTop:2}}>Exit: T1:{TIER1}x T2:{TIER2}x T3:{TIER3}x · Max {MAX_HOLD}m</div>
           </div>
@@ -862,16 +862,10 @@ function AppInner({ token, headers, onLogout }) {
 
       <div style={{padding:"5px",borderTop:`1px solid ${BORDER}`,background:CARD,
         fontSize:6,color:"#0c1820",textAlign:"center"}}>
-        S0NAR v6.0 · 4-ALGO LAB · PAPER TRADING · NOT FINANCIAL ADVICE
+        S0NAR v6.1 · 4-ALGO LAB · PAPER TRADING · NOT FINANCIAL ADVICE
       </div>
     </div>
   );
 }
 
-// Algo descriptions for compare/settings views
-const ALGOS_DESC = {
-  a: "Low FOMO (15-45) + high liq ($50k+) + quiet price (-5% to +15%). The BGOLD pattern.",
-  b: "Confirms move starting. FOMO 40-70, price +10-40%, moderate liq. Enter on confirmation.",
-  c: "Ultra early — first 15 minutes only. Higher risk, potentially much higher reward.",
-  d: "Current v5.5 system unchanged. Control group for comparison.",
-};
+// end of App.jsx v6.1
