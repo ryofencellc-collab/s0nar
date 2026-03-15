@@ -1,8 +1,6 @@
 # S0NAR v8 — Render Blueprint
-# Creates: Web service + Worker + Database
 
 services:
-  # Main web service: Dashboard + Detection
   - type: web
     name: s0nar-web
     runtime: node
@@ -28,7 +26,6 @@ services:
       - key: DETECTION_INTERVAL_MS
         value: 15000
 
-  # Background worker: Position monitoring
   - type: worker
     name: s0nar-worker
     runtime: node
@@ -53,5 +50,4 @@ services:
 
 databases:
   - name: s0nar-db
-    plan: starter
-    ipAllowList: []
+    plan: basic  # Changed from starter to
