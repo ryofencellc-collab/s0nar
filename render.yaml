@@ -1,0 +1,57 @@
+# S0NAR v8 — Render Blueprint
+# Creates: Web service + Worker + Database
+
+services:
+  # Main web service: Dashboard + Detection
+  - type: web
+    name: s0nar-web
+    runtime: node
+    plan: standard
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: s0nar-db
+          property: connectionString
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: PAPER_TRADING
+        value: true
+      - key: BANKROLL
+        value: 5000
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DETECTION_INTERVAL_MS
+        value: 15000
+
+  # Background worker: Position monitoring
+  - type: worker
+    name: s0nar-worker
+    runtime: node
+    plan: standard
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && node worker.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: s0nar-db
+          property: connectionString
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: PAPER_TRADING
+        value: true
+      - key: BANKROLL
+        value: 5000
+      - key: CHECK_INTERVAL_MS
+        value: 10000
+
+databases:
+  - name: s0nar-db
+    plan: starter
+    ipAllowList: []
