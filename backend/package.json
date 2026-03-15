@@ -1,0 +1,24 @@
+{
+  "name": "s0nar-v8-render",
+  "version": "1.0.0",
+  "description": "Render-only memecoin detection and trading",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "worker": "node worker.js",
+    "dev": "concurrently \"npm start\" \"npm run worker\""
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "pg": "^8.11.3",
+    "node-fetch": "^2.7.0",
+    "dotenv": "^16.3.1",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
