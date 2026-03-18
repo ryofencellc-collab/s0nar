@@ -1682,6 +1682,20 @@ app.get("/api/status", (req, res) => {
   });
 });
 
+// ── TEST NOTIFICATION ─────────────────────────────────────
+app.get("/api/test-notify", async (req, res) => {
+  const topic = process.env.NTFY_TOPIC;
+  if (!topic) {
+    return res.json({ ok: false, message: "NTFY_TOPIC not set in Render environment variables" });
+  }
+  await notify(
+    "S0NAR — Test Notification ✅",
+    "If you see this your alerts are working perfectly.\n\nYou will be notified when:\n• Bot has no trades for 2+ hours\n• Data source breaks\n• Helius disconnects\n• Big win closes (+$20)",
+    "default"
+  );
+  res.json({ ok: true, message: `Test notification sent to topic: ${topic}` });
+});
+
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
