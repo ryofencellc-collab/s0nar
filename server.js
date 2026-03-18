@@ -126,18 +126,23 @@ async function notify(title, message, priority = "default") {
   const topic = process.env.NTFY_TOPIC;
   if (!topic) return;
   try {
-    await fetch(`https://ntfy.sh/${topic}`, {
+    // Use JSON body format — works reliably with iOS ntfy app
+    const r = await fetch(`https://ntfy.sh/`, {
       method: "POST",
-      headers: {
-        "Title": title,
-        "Priority": priority,
-        "Tags": priority === "urgent" ? "rotating_light" : priority === "high" ? "warning" : "white_check_mark",
-        "Content-Type": "text/plain",
-      },
-      body: message,
-      timeout: 5000,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        topic,
+        title,
+        message,
+        priority: priority === "urgent" ? 5 : priority === "high" ? 4 : priority === "low" ? 2 : 3,
+        tags: [priority === "urgent" ? "rotating_light" : priority === "high" ? "warning" : "white_check_mark"],
+      }),
+      timeout: 8000,
     });
-  } catch(e) { /* never block */ }
+    console.log(`[NTFY] sent "${title}" status:${r.status}`);
+  } catch(e) {
+    console.error("[NTFY] failed:", e.message);
+  }
 }
 
 const alertThrottle = new Map();
