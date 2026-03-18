@@ -122,7 +122,32 @@ if (hasDist) {
   console.log("Serving frontend from dist/");
 }
 
-async function notify() { return; }
+async function notify(title, message, priority = "default") {
+  const topic = process.env.NTFY_TOPIC;
+  if (!topic) return;
+  try {
+    await fetch(`https://ntfy.sh/${topic}`, {
+      method: "POST",
+      headers: {
+        "Title": title,
+        "Priority": priority,
+        "Tags": priority === "urgent" ? "rotating_light" : priority === "high" ? "warning" : "white_check_mark",
+        "Content-Type": "text/plain",
+      },
+      body: message,
+      timeout: 5000,
+    });
+  } catch(e) { /* never block */ }
+}
+
+const alertThrottle = new Map();
+async function alertOnce(key, cooldownMin, title, message, priority = "high") {
+  const last = alertThrottle.get(key) || 0;
+  if (Date.now() - last < cooldownMin * 60000) return;
+  alertThrottle.set(key, Date.now());
+  await notify(title, message, priority);
+  console.log(`[ALERT] ${title}`);
+}
 
 // ── ALGORITHM CONFIGS ──────────────────────────────────────
 const ALGOS = {
@@ -223,6 +248,18 @@ const algoState = {
   c: { dailyPnl: 0, circuitBroken: false },
   d: { dailyPnl: 0, circuitBroken: false },
   e: { dailyPnl: 0, circuitBroken: false },
+};
+
+// ── SELF-MONITORING ────────────────────────────────────────
+const monitor = {
+  lastEntryTime:      null,   // last time ANY algo entered a trade
+  lastFreshTokenTime: null,   // last time we saw a token <90 min old
+  lastHeliusTokenTime:null,   // last time helius queued a token
+  totalTokensSeen:    0,      // lifetime token count
+  freshTokensSeen:    0,      // tokens under 90 min old
+  heliusQueueCount:   0,      // total tokens queued from helius
+  pollsWithNoFresh:   0,      // consecutive polls with zero fresh tokens
+  startTime:          Date.now(),
 };
 
 const fomoFadeCounter   = new Map();
@@ -1153,7 +1190,21 @@ async function pollSignals() {
       all.push(p);
     }
 
-    console.log(`  data: search:${searchPairs.length} boosted:${boostedPairs.length} new:${newTokens.length} helius:${heliusQueued.length} total:${all.length}`);
+    // Monitor fresh token flow
+    const freshCount = all.filter(p => p.pairCreatedAt && (Date.now() - p.pairCreatedAt) < 90 * 60000).length;
+    monitor.totalTokensSeen += all.length;
+    monitor.freshTokensSeen += freshCount;
+    if (freshCount > 0) {
+      monitor.lastFreshTokenTime = Date.now();
+      monitor.pollsWithNoFresh = 0;
+    } else {
+      monitor.pollsWithNoFresh++;
+    }
+    if (heliusQueued.length > 0) {
+      monitor.lastHeliusTokenTime = Date.now();
+      monitor.heliusQueueCount += heliusQueued.length;
+    }
+    console.log(`  data: search:${searchPairs.length} boosted:${boostedPairs.length} new:${newTokens.length} helius:${heliusQueued.length} fresh:${freshCount} total:${all.length}`);
 
     // Score every token once
     const scored = all.map(p => ({
@@ -1211,6 +1262,7 @@ async function pollSignals() {
 
         if (trade) {
           totals[algoKey]++;
+          monitor.lastEntryTime = Date.now();
           const liq = p.liquidity?.usd || 0;
           const age = p.pairCreatedAt ? ((Date.now()-p.pairCreatedAt)/60000).toFixed(0) : "?";
           console.log(`  [${algoKey.toUpperCase()}] ENTERED ${p.baseToken?.symbol} sc:${sc} fomo:${fomo} bet:$${trade.bet_size} age:${age}m rug:${rugResult.score}`);
@@ -1342,6 +1394,17 @@ async function checkPositions() {
             st.dailyPnl += res.pnl;
             checkCircuit(algoKey);
             console.log(`  [${algoKey.toUpperCase()}] CLOSED ${t.ticker} ${res.exit} ${res.pnl>=0?"+":""}$${res.pnl.toFixed(2)}`);
+            // Notify on big wins (>$20) or moon shots
+            if (res.pnl >= 20) {
+              await notify(
+                `S0NAR — ${res.exit} 💰 +$${res.pnl.toFixed(2)}`,
+                `${t.ticker} closed ${res.exit}
+Algo: ${algoKey.toUpperCase()} | ${res.mult.toFixed(2)}x
+P&L: +$${res.pnl.toFixed(2)}
+Peak: ${res.highMult.toFixed(2)}x`,
+                res.pnl >= 100 ? "urgent" : "high"
+              );
+            }
           }
         } catch(e) { console.error(`  [${algoKey}] ${t.ticker}:`, e.message); }
 
@@ -1417,7 +1480,7 @@ async function getAlgoStats(algoKey) {
 app.get("/health", (req, res) => res.json({
   status: "ok",
   ts: new Date().toISOString(),
-  version: "8.2",
+  version: "8.3",
   marketMood: mood,
   pollCount,
   heliusWs: heliusWs ? "connected" : "disconnected",
@@ -1572,15 +1635,128 @@ app.post("/api/wipe", async(req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── STATUS — plain English health report ──────────────────
+app.get("/api/status", (req, res) => {
+  const now = Date.now();
+  const uptimeMin = Math.round((now - monitor.startTime) / 60000);
+  const sinceEntryMin = monitor.lastEntryTime ? Math.round((now - monitor.lastEntryTime) / 60000) : null;
+  const sinceFreshMin = monitor.lastFreshTokenTime ? Math.round((now - monitor.lastFreshTokenTime) / 60000) : null;
+  const sinceHeliusMin = monitor.lastHeliusTokenTime ? Math.round((now - monitor.lastHeliusTokenTime) / 60000) : null;
+
+  const issues = [];
+  const warnings = [];
+
+  if (sinceEntryMin === null && uptimeMin > 30) issues.push("No trades entered since startup");
+  else if (sinceEntryMin !== null && sinceEntryMin > 120) issues.push(`No trades in ${sinceEntryMin} minutes`);
+  else if (sinceEntryMin !== null && sinceEntryMin > 60) warnings.push(`No trades in ${sinceEntryMin} minutes`);
+
+  if (sinceFreshMin === null && uptimeMin > 15) issues.push("No fresh tokens seen — data source broken");
+  else if (sinceFreshMin !== null && sinceFreshMin > 30) issues.push(`No fresh tokens in ${sinceFreshMin} min — DexScreener stale`);
+  else if (sinceFreshMin !== null && sinceFreshMin > 15) warnings.push(`No fresh tokens in ${sinceFreshMin} min`);
+
+  if (!heliusWs) issues.push("Helius WebSocket disconnected");
+  if (pollCount < 2 && uptimeMin > 1) issues.push("Polling not running");
+
+  const overall = issues.length > 0 ? "RED" : warnings.length > 0 ? "YELLOW" : "GREEN";
+
+  res.json({
+    status: overall,
+    message: overall === "GREEN" ? "All systems normal — bot is hunting" :
+             overall === "YELLOW" ? "Minor issues — check soon" :
+             "ACTION NEEDED — bot may not be trading",
+    uptime: `${uptimeMin} minutes`,
+    issues,
+    warnings,
+    stats: {
+      pollCount,
+      totalTokensSeen: monitor.totalTokensSeen,
+      freshTokensSeen: monitor.freshTokensSeen,
+      heliusQueueCount: monitor.heliusQueueCount,
+      pollsWithNoFresh: monitor.pollsWithNoFresh,
+      lastEntryAgo: sinceEntryMin !== null ? `${sinceEntryMin} min ago` : "never since restart",
+      lastFreshAgo: sinceFreshMin !== null ? `${sinceFreshMin} min ago` : "never since restart",
+      heliusWs: heliusWs ? "connected" : "disconnected",
+      marketMood: mood,
+    },
+    ts: new Date().toISOString(),
+  });
+});
+
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR v8.0 backend running.");
+  res.status(200).send("S0NAR v8.3 backend running.");
 });
+
+// ── HEALTH ALERTS ─────────────────────────────────────────
+async function runHealthAlerts() {
+  const now = Date.now();
+  const uptimeMin = (now - monitor.startTime) / 60000;
+  if (uptimeMin < 10) return; // Give bot time to warm up first
+
+  const sinceEntryMin = monitor.lastEntryTime ? (now - monitor.lastEntryTime) / 60000 : uptimeMin;
+  const sinceFreshMin = monitor.lastFreshTokenTime ? (now - monitor.lastFreshTokenTime) / 60000 : uptimeMin;
+
+  // Alert: No trades in 2 hours
+  if (sinceEntryMin > 120) {
+    await alertOnce(
+      "no_trades_2h", 120, // cooldown 2h — alert max once per 2h
+      "S0NAR — No Trades ⚠",
+      `Bot hasn't entered a trade in ${Math.round(sinceEntryMin)} minutes.
+
+Market mood: ${mood}
+Polls run: ${pollCount}
+Fresh tokens seen: ${monitor.freshTokensSeen}
+
+Check: /api/status`,
+      "high"
+    );
+  }
+
+  // Alert: No fresh tokens — data source broken
+  if (sinceFreshMin > 30) {
+    await alertOnce(
+      "no_fresh_30m", 60, // cooldown 1h
+      "S0NAR — Data Issue 🔴",
+      `No fresh tokens (under 90min old) seen in ${Math.round(sinceFreshMin)} minutes.
+
+DexScreener may be rate-limiting or broken.
+Helius queued: ${monitor.heliusQueueCount} total
+
+Check: /api/status`,
+      "urgent"
+    );
+  }
+
+  // Alert: Helius disconnected
+  if (!heliusWs) {
+    await alertOnce(
+      "helius_down", 30, // cooldown 30min
+      "S0NAR — Helius Down 🔴",
+      "Helius WebSocket disconnected. New token detection is offline. Will auto-reconnect.",
+      "urgent"
+    );
+  }
+
+  // Alert: Bot woke up (first run after deploy/restart)
+  if (uptimeMin > 2 && uptimeMin < 7) {
+    await alertOnce(
+      "bot_started", 9999, // only once per run
+      "S0NAR — Bot Started ✅",
+      `S0NAR v8.3 is live and scanning.
+Market: ${mood}
+All 5 algos running.`,
+      "low"
+    );
+  }
+
+  // Good news alert: trade entered
+  // (called from insertTrade success, not here)
+}
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR LAB v8.2 | Port:${PORT}`);
+  console.log(`\nS0NAR LAB v8.3 | Port:${PORT}`);
   console.log(`DB:${process.env.DATABASE_URL?"connected":"MISSING"}`);
   console.log(`HELIUS:${HELIUS_KEY?"key present":"MISSING - websocket disabled"}`);
   console.log(`Algos: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name} E=${ALGOS.e.name}`);
@@ -1599,4 +1775,5 @@ app.listen(PORT, async () => {
   setInterval(updateMood,     5 * 60 * 1000);
   setInterval(refreshDaily,   2 * 60 * 1000);
   setInterval(cleanupSignals, 6 * 60 * 60 * 1000);
+  setInterval(runHealthAlerts, 5 * 60 * 1000); // Health alerts every 5 min
 });
