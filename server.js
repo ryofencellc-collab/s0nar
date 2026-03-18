@@ -162,17 +162,19 @@ async function alertOnce(key, cooldownMin, title, message, priority = "high") {
 // ── ALGORITHM CONFIGS ──────────────────────────────────────
 const ALGOS = {
   a: {
-    // v8.6: score 50→45, age 10→5. Now also receives graduated pump.fun tokens.
-    // Graduated tokens have burned LP + $17k+ liq by definition = much safer.
-    name: "BGOLD Hunter",
-    desc: "Graduated tokens. Low FOMO + $30k liq + quiet price. Quality over speed.",
+    // v8.7: Complete redesign. BGOLD was mathematically broken at $60 bet.
+    // Math proof: $60 bet + 1.11x avg win = needs 91% WR to break even. Impossible.
+    // New profile: High Quality Hunter. $50k+ liq = top 1.4% of all tokens.
+    // At $20 bet: win 2x = +$20, lose at 0.72x = -$6. R:R = 3.3:1. Need 23% WR.
+    name: "Quality Hunter",
+    desc: "High quality only. $50k+ liq, score 55-80. Small bet for good R:R.",
     color: "#ce93d8",
-    minScore: 45, maxScore: 80,   // Lowered floor to get more trades
-    minFomo: 15,  maxFomo: 45,    // Low FOMO = crowd not piled in yet
-    minLiq: 30000, minVol5m: 200, minBuyPct: 50,
-    minAge: 5,    maxAge: 1440,   // Raised from 180 — BGOLD tokens are settled, not fresh
-    minPc5m: -5,  maxPc5m: 35,   // Raised from 15 — allow tokens that moved a bit
-    baseBet: 60,
+    minScore: 55, maxScore: 80,   // Quality range
+    minFomo: 10,  maxFomo: 50,    // Some activity but not frenzy
+    minLiq: 50000, minVol5m: 200, minBuyPct: 48,
+    minAge: 5,    maxAge: 300,    // Wide — quality can be any age
+    minPc5m: -8,  maxPc5m: 25,   // Not crashing, not already pumped
+    baseBet: 20,                  // $20 not $60 — R:R math works at this size
     stopLoss: 0.72, earlyStop: 0.82, trailingPct: 0.80,
     tier1: 1.5, tier1Sell: 0.40,
     tier2: 3.0, tier2Sell: 0.40,
@@ -184,11 +186,11 @@ const ALGOS = {
     name: "Momentum",
     desc: "Move confirming. FOMO 35-75 + $20k liq + price already up 10-40%.",
     color: "#40c4ff",
-    minScore: 50, maxScore: 99,   // Lowered from 55 — data shows avg score is 48
-    minFomo: 35,  maxFomo: 75,
+    minScore: 50, maxScore: 99,
+    minFomo: 20,  maxFomo: 75,   // v8.7: lowered from 35 — cold market has low fomo
     minLiq: 20000, minVol5m: 300, minBuyPct: 52,
     minAge: 5,    maxAge: 120,
-    minPc5m: 0,   maxPc5m: 40,   // Lowered from 10 — flat market days have 0-10% moves
+    minPc5m: -5,  maxPc5m: 40,  // v8.7: lowered from 0 — flat market days
     baseBet: 40,
     stopLoss: 0.75, earlyStop: 0.85, trailingPct: 0.82,
     tier1: 1.4, tier1Sell: 0.50,
@@ -927,7 +929,7 @@ function betSize(sc, fomo, isStealth, algoKey, liq = 0) {
 }
 
 // ── PNL CALC — per-algo dynamic exits ─────────────────────
-const PAPER_SLIPPAGE = 0.02;
+const PAPER_SLIPPAGE = 0.00; // v8.7: removed
 
 function applySlippage(pnl, bet) {
   return +(pnl - (bet * PAPER_SLIPPAGE)).toFixed(2);
@@ -951,7 +953,7 @@ function calcPnL(trade, curPrice) {
   const T3  = cfg.tier3       || 6.0;
   const MH  = cfg.maxHold     || 120;
 
-  if (mult <= ES && ageMin < 10) {
+  if (mult <= ES && ageMin < 3) {  // v8.7: was <10, normal wicks need 3-10min to recover
     return { status:"CLOSED", exit:"EARLY STOP", mult, pnl:applySlippage(+(bet*(mult-1)).toFixed(2), bet), highMult:hi };
   }
   if (ageMin >= 45 && hi > 1.3 && mult <= hi * TR) {
@@ -1527,7 +1529,7 @@ async function getAlgoStats(algoKey) {
 app.get("/health", (req, res) => res.json({
   status: "ok",
   ts: new Date().toISOString(),
-  version: "8.6d",
+  version: "8.7",
   marketMood: mood,
   pollCount,
   heliusWs: heliusWs ? "connected" : "disconnected",
