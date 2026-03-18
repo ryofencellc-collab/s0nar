@@ -170,8 +170,8 @@ const ALGOS = {
     minScore: 45, maxScore: 80,   // Lowered floor to get more trades
     minFomo: 15,  maxFomo: 45,    // Low FOMO = crowd not piled in yet
     minLiq: 30000, minVol5m: 200, minBuyPct: 50,
-    minAge: 5,    maxAge: 180,    // Lowered from 10 — catch 5-10min window
-    minPc5m: -5,  maxPc5m: 15,   // Quiet price — not pumping yet
+    minAge: 5,    maxAge: 1440,   // Raised from 180 — BGOLD tokens are settled, not fresh
+    minPc5m: -5,  maxPc5m: 35,   // Raised from 15 — allow tokens that moved a bit
     baseBet: 60,
     stopLoss: 0.72, earlyStop: 0.82, trailingPct: 0.80,
     tier1: 1.5, tier1Sell: 0.40,
@@ -184,11 +184,11 @@ const ALGOS = {
     name: "Momentum",
     desc: "Move confirming. FOMO 35-75 + $20k liq + price already up 10-40%.",
     color: "#40c4ff",
-    minScore: 55, maxScore: 99,
+    minScore: 50, maxScore: 99,   // Lowered from 55 — data shows avg score is 48
     minFomo: 35,  maxFomo: 75,
     minLiq: 20000, minVol5m: 300, minBuyPct: 52,
     minAge: 5,    maxAge: 120,
-    minPc5m: 10,  maxPc5m: 40,
+    minPc5m: 0,   maxPc5m: 40,   // Lowered from 10 — flat market days have 0-10% moves
     baseBet: 40,
     stopLoss: 0.75, earlyStop: 0.85, trailingPct: 0.82,
     tier1: 1.4, tier1Sell: 0.50,
@@ -206,7 +206,7 @@ const ALGOS = {
     minScore: 35, maxScore: 99,   // Lowered to compensate for tighter liq
     minFomo: 10,  maxFomo: 85,
     minLiq: 15000, minVol5m: 50,  minBuyPct: 45,
-    minAge: 0,    maxAge: 90,
+    minAge: 0,    maxAge: 180,   // Raised from 90 — DexScreener rarely surfaces <90m tokens
     minPc5m: -10, maxPc5m: 99,
     baseBet: 25,
     stopLoss: 0.65, earlyStop: 0.78, trailingPct: 0.78,
@@ -226,7 +226,7 @@ const ALGOS = {
     minScore: 45, maxScore: 99,
     minFomo: 10,  maxFomo: 99,
     minLiq: 25000, minVol5m: 100, minBuyPct: 45,
-    minAge: 5,    maxAge: 180,
+    minAge: 5,    maxAge: 720,   // Raised from 180 — need to trade what DexScreener actually shows
     minPc5m: -25, maxPc5m: 999,
     baseBet: 40,
     stopLoss: 0.72, earlyStop: 0.82, trailingPct: 0.82,
@@ -240,10 +240,12 @@ const ALGOS = {
     name: "Smart Wallet",
     desc: "Follows wallets with proven 60%+ win rates. Copies smart money.",
     color: "#ff6b6b",
-    minScore: 45, maxScore: 99,
+    // E relies on smart wallet signal as primary filter — loosen everything else
+    // When Helius detects 2+ smart wallets buying, we trust it regardless of metrics
+    minScore: 40, maxScore: 99,   // Lowered — wallet signal is the real filter
     minFomo: 10,  maxFomo: 80,
-    minLiq: 15000, minVol5m: 100, minBuyPct: 48,
-    minAge: 0,    maxAge: 60,
+    minLiq: 15000, minVol5m: 50,  minBuyPct: 45, // Loosened to not miss wallet picks
+    minAge: 0,    maxAge: 360,   // Raised from 60 — smart wallets buy at any age
     minPc5m: -20, maxPc5m: 200,
     baseBet: 50,
     stopLoss: 0.70, earlyStop: 0.80, trailingPct: 0.80,
@@ -1525,7 +1527,7 @@ async function getAlgoStats(algoKey) {
 app.get("/health", (req, res) => res.json({
   status: "ok",
   ts: new Date().toISOString(),
-  version: "8.6",
+  version: "8.6d",
   marketMood: mood,
   pollCount,
   heliusWs: heliusWs ? "connected" : "disconnected",
@@ -1619,6 +1621,41 @@ app.get("/api/open-pnl", async(req, res) => {
           warning, algo:algoKey, is_stealth:t.is_stealth,
           smart_wallet_signal: t.smart_wallet_signal };
       });
+    }
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// All algos debug in one call
+app.get("/api/debug/all", async(req, res) => {
+  try {
+    const result = {};
+    for (const algoKey of ["a","b","c","d","e"]) {
+      const rows = (await db(`
+        SELECT ticker, score, fomo_score, stealth_score, liq, vol_5m, pc_5m,
+               age_min, entered, skip_reason, seen_at
+        FROM signals_${algoKey} ORDER BY seen_at DESC LIMIT 50`
+      )).rows;
+      const skipTally = {};
+      rows.filter(s => s.skip_reason).forEach(s => {
+        s.skip_reason.split("; ").forEach(reason => {
+          const key = reason.split(" ").slice(0, 4).join(" ");
+          skipTally[key] = (skipTally[key] || 0) + 1;
+        });
+      });
+      result[algoKey] = {
+        name: ALGOS[algoKey].name,
+        config: { minScore: ALGOS[algoKey].minScore, maxScore: ALGOS[algoKey].maxScore,
+                  minFomo: ALGOS[algoKey].minFomo, maxFomo: ALGOS[algoKey].maxFomo,
+                  minLiq: ALGOS[algoKey].minLiq, minAge: ALGOS[algoKey].minAge, maxAge: ALGOS[algoKey].maxAge,
+                  minPc5m: ALGOS[algoKey].minPc5m, maxPc5m: ALGOS[algoKey].maxPc5m },
+        total: rows.length,
+        entered: rows.filter(s => s.entered).length,
+        skipped: rows.filter(s => !s.entered).length,
+        avgScore: rows.length ? Math.round(rows.reduce((a,s)=>a+parseInt(s.score||0),0)/rows.length) : 0,
+        avgFomo:  rows.length ? Math.round(rows.reduce((a,s)=>a+parseInt(s.fomo_score||0),0)/rows.length) : 0,
+        topSkipReasons: Object.entries(skipTally).sort((a,b)=>b[1]-a[1]).slice(0,8),
+      };
     }
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
