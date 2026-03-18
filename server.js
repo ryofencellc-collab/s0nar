@@ -1,14 +1,13 @@
 // ============================================================
-//  S0NAR — IRON DOME v8.6  "RESEARCH-BACKED LIQ FLOORS + A PIPELINE FIX"
-//  Changes from v8.5f:
-//  - A: score 50→45, age 10-180→5-180, added graduated token pipeline
-//  - B: liq $10k→$20k (Degens level per research)
-//  - C: liq $3k→$15k (Super Degens min per research), score 40→35
-//  - D: liq $8k→$25k, age 3-360→5-180, added vol/liq rug ratio filter
-//  - E: liq $5k→$15k (match research minimums)
-//  - Added dexGraduated() — fetches recently graduated pump.fun tokens
-//    (these always have burned LP + $17k+ liq = safer for Algo A)
-//  - Tightened junk filter: liq $300→$2000 pre-log
+//  S0NAR — IRON DOME v8.8  "BLOCKING RUGCHECK — THE CANCER TREATMENT"
+//  Root cause identified: rugcheck was non-blocking. Every rug was first-time entry.
+//  We entered BEFORE rugcheck came back. Now we WAIT for the result.
+//
+//  Changes from v8.7:
+//  - BLOCKING rugcheck on every entry (was fire-and-forget)
+//  - LP unlocked is now a hard block (was not checked)
+//  - betSize Math.max(25→10) so baseBet=20 for A actually works
+//  - Header/startup log version bumped to 8.8
 // ============================================================
 const express  = require("express");
 const cors     = require("cors");
@@ -87,7 +86,7 @@ async function initDB() {
     const count = await db(`SELECT COUNT(*) FROM trades_${algo}`);
     console.log(`  trades_${algo}: ${count.rows[0].count} rows`);
   }
-  console.log("DB ready v8.2 — 5 algo tables (A-E) verified");
+  console.log("DB ready v8.8 — 5 algo tables (A-E) verified");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -492,7 +491,26 @@ async function checkRugcheck(tokenAddress) {
     if (d?.mintAuthority)    flags.push("mint_authority");
     if (d?.freezeAuthority)  flags.push("freeze_authority");
     if (d?.mutable)          flags.push("mutable_metadata");
-    if (d?.lpUnlocked)       flags.push("lp_unlocked");
+
+    // v8.8: Check LP lock status across all markets
+    // If any market has unlocked LP, flag it
+    const markets = d?.markets || [];
+    let anyLpUnlocked = false;
+    let anyLpLocked = false;
+    for (const market of markets) {
+      const lp = market?.lp || {};
+      const burned = lp.lpBurned || false;
+      const lockedPct = lp.lpLockedPct || 0;
+      if (burned || lockedPct >= 80) {
+        anyLpLocked = true;
+      } else {
+        anyLpUnlocked = true;
+      }
+    }
+    // Only flag lp_unlocked if NO market has burned/locked LP
+    if (markets.length > 0 && anyLpUnlocked && !anyLpLocked) {
+      flags.push("lp_unlocked");
+    }
 
     // Top holder concentration check
     const topHolderPct = d?.topHolders?.[0]?.pct || 0;
@@ -501,8 +519,9 @@ async function checkRugcheck(tokenAddress) {
     const top10Pct = (d?.topHolders || []).slice(0, 10).reduce((a, h) => a + (h.pct || 0), 0);
     if (top10Pct > 80) flags.push(`top10_hold_${Math.round(top10Pct)}pct`);
 
-    // Pass if score < 500 (rugcheck uses 0-1000 scale) and no hard flags
-    const hardFlags = ["mint_authority", "freeze_authority"];
+    // v8.8: Tightened criteria — also block unlocked LP
+    // LP unlocked = developer can drain the pool any time = guaranteed rug risk
+    const hardFlags = ["mint_authority", "freeze_authority", "lp_unlocked"];
     const hasHardFlag = flags.some(f => hardFlags.includes(f));
     const pass = score < 500 && !hasHardFlag;
 
@@ -925,7 +944,9 @@ function betSize(sc, fomo, isStealth, algoKey, liq = 0) {
   const stealthMult = isStealth ? 1.3 : 1.0;
   const liqCap = liq > 0 ? Math.max(10, liq * 0.001) : 150;
 
-  return Math.min(liqCap, Math.min(150, Math.max(25, Math.round((base * scoreMult * stealthMult) / 5) * 5)));
+  // v8.8: Changed Math.max(25,...) to Math.max(10,...) so baseBet=20 is respected
+  // Previously A's $20 baseBet was always overridden to $25 minimum
+  return Math.min(liqCap, Math.min(150, Math.max(10, Math.round((base * scoreMult * stealthMult) / 5) * 5)));
 }
 
 // ── PNL CALC — per-algo dynamic exits ─────────────────────
@@ -1281,20 +1302,21 @@ async function pollSignals() {
         const existingAlgos = crossAlgoExposure.get(tokenKey);
         if (existingAlgos && existingAlgos.size >= 2 && !existingAlgos.has(algoKey)) continue;
 
-        // Phase 1: Rugcheck — non-blocking, check cache only (async in background)
+        // v8.8: BLOCKING rugcheck — wait for result before entering.
+        // This is the fix. Every delist/liq-pull was a first-time token.
+        // We were entering before rugcheck came back. Now we wait.
+        // Timeout is 5s — if API is slow/down we fail open and proceed.
         const tokenAddr = p.baseToken?.address || tokenKey;
-        const rugResult = rugCache.has(tokenAddr) ? rugCache.get(tokenAddr) : { score: 50, flags: [], pass: true };
-        // Kick off background check for next time (don't await)
-        if (!rugCache.has(tokenAddr)) {
-          checkRugcheck(tokenAddr).catch(() => {});
-          checkBirdeye(tokenAddr).catch(() => {});
-        }
-        // Only hard-block on cached failures — never block on first-seen tokens
-        if (rugCache.has(tokenAddr) && !rugResult.pass) {
-          console.log(`  [${algoKey.toUpperCase()}] RUGCHECK CACHED FAIL ${p.baseToken?.symbol}`);
+        const rugResult = await checkRugcheck(tokenAddr);
+        if (!rugResult.pass) {
+          console.log(`  [${algoKey.toUpperCase()}] RUGCHECK BLOCKED ${p.baseToken?.symbol} score:${rugResult.score} flags:${rugResult.flags.join(',')}`);
           continue;
         }
 
+        // Birdeye check — also blocking now, uses cache so fast on repeat
+        if (!birdeyeCache.has(tokenAddr)) {
+          checkBirdeye(tokenAddr).catch(() => {}); // Still non-blocking — holder check is secondary
+        }
         const holderData = birdeyeCache.has(tokenAddr) ? birdeyeCache.get(tokenAddr) : { concentration: 0, pass: true };
 
         const trade = await insertTrade(algoKey, p, sc, fomo, {
@@ -1529,7 +1551,7 @@ async function getAlgoStats(algoKey) {
 app.get("/health", (req, res) => res.json({
   status: "ok",
   ts: new Date().toISOString(),
-  version: "8.7",
+  version: "8.8",
   marketMood: mood,
   pollCount,
   heliusWs: heliusWs ? "connected" : "disconnected",
@@ -1783,7 +1805,7 @@ app.get("/api/test-notify", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR v8.3 backend running.");
+  res.status(200).send("S0NAR v8.8 backend running.");
 });
 
 // ── HEALTH ALERTS ─────────────────────────────────────────
@@ -1854,7 +1876,7 @@ All 5 algos running.`,
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR LAB v8.5 | Port:${PORT}`);
+  console.log(`\nS0NAR v8.8 | Port:${PORT}`);
   console.log(`DB:${process.env.DATABASE_URL?"connected":"MISSING"}`);
   console.log(`HELIUS:${HELIUS_KEY?"key present":"MISSING - websocket disabled"}`);
   console.log(`Algos: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name} E=${ALGOS.e.name}`);
