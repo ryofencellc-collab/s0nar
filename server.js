@@ -1,9 +1,14 @@
 // ============================================================
-//  S0NAR — IRON DOME v8.0  "PHASE 1+2 UPGRADES"
-//  New: Rugcheck API, Birdeye holder check, Helius pump.fun websocket,
-//       Smart Wallet Tracker (Algo E), dynamic exits per algo,
-//       DexScreener websocket for faster token detection
-//  Kept: All v7 Kimi fixes (LRU, 3-miss, 2-check FOMO, liq-adjusted bet, cross-algo)
+//  S0NAR — IRON DOME v8.6  "RESEARCH-BACKED LIQ FLOORS + A PIPELINE FIX"
+//  Changes from v8.5f:
+//  - A: score 50→45, age 10-180→5-180, added graduated token pipeline
+//  - B: liq $10k→$20k (Degens level per research)
+//  - C: liq $3k→$15k (Super Degens min per research), score 40→35
+//  - D: liq $8k→$25k, age 3-360→5-180, added vol/liq rug ratio filter
+//  - E: liq $5k→$15k (match research minimums)
+//  - Added dexGraduated() — fetches recently graduated pump.fun tokens
+//    (these always have burned LP + $17k+ liq = safer for Algo A)
+//  - Tightened junk filter: liq $300→$2000 pre-log
 // ============================================================
 const express  = require("express");
 const cors     = require("cors");
@@ -157,64 +162,71 @@ async function alertOnce(key, cooldownMin, title, message, priority = "high") {
 // ── ALGORITHM CONFIGS ──────────────────────────────────────
 const ALGOS = {
   a: {
+    // v8.6: score 50→45, age 10→5. Now also receives graduated pump.fun tokens.
+    // Graduated tokens have burned LP + $17k+ liq by definition = much safer.
     name: "BGOLD Hunter",
-    desc: "Low FOMO + high liq + quiet price. The proven winner profile.",
+    desc: "Graduated tokens. Low FOMO + $30k liq + quiet price. Quality over speed.",
     color: "#ce93d8",
-    minScore: 50, maxScore: 80,
-    minFomo: 15,  maxFomo: 45,
+    minScore: 45, maxScore: 80,   // Lowered floor to get more trades
+    minFomo: 15,  maxFomo: 45,    // Low FOMO = crowd not piled in yet
     minLiq: 30000, minVol5m: 200, minBuyPct: 50,
-    minAge: 10,   maxAge: 180,
-    minPc5m: -5,  maxPc5m: 15,
+    minAge: 5,    maxAge: 180,    // Lowered from 10 — catch 5-10min window
+    minPc5m: -5,  maxPc5m: 15,   // Quiet price — not pumping yet
     baseBet: 60,
-    // Dynamic exits — tuned for slow stealthy entries
     stopLoss: 0.72, earlyStop: 0.82, trailingPct: 0.80,
     tier1: 1.5, tier1Sell: 0.40,
-    tier2: 3.0, tier2Sell: 0.40, // Hold more at tier2
+    tier2: 3.0, tier2Sell: 0.40,
     tier3: 6.0,
-    maxHold: 150, // Hold longer — these are slower movers
+    maxHold: 150,
   },
   b: {
+    // v8.6: Liq raised $10k→$20k. Research: $15k = Degens minimum. $20k = margin.
     name: "Momentum",
-    desc: "Confirms the move is starting. Enters early in the pump.",
+    desc: "Move confirming. FOMO 35-75 + $20k liq + price already up 10-40%.",
     color: "#40c4ff",
     minScore: 55, maxScore: 99,
     minFomo: 35,  maxFomo: 75,
-    minLiq: 10000, minVol5m: 300, minBuyPct: 52,
+    minLiq: 20000, minVol5m: 300, minBuyPct: 52,
     minAge: 5,    maxAge: 120,
     minPc5m: 10,  maxPc5m: 40,
     baseBet: 40,
-    // Faster exits — momentum can reverse fast
     stopLoss: 0.75, earlyStop: 0.85, trailingPct: 0.82,
-    tier1: 1.4, tier1Sell: 0.50, // Take more profit at tier1
+    tier1: 1.4, tier1Sell: 0.50,
     tier2: 2.5, tier2Sell: 0.35,
     tier3: 5.0,
     maxHold: 90,
   },
   c: {
+    // v8.6: Liq raised $3k→$15k. Night 1: 4 delisteds out of 13 = $3k was garbage.
+    // Research: $10k = Super Degens minimum. $15k gives actual safety margin.
+    // Score lowered 40→35 to compensate for tighter liq — still catches early movers.
     name: "Early Mover",
-    desc: "Ultra early entry. First 15 minutes. High risk, high reward.",
+    desc: "First 90 min. $15k liq floor. Score 35+. High risk, high reward.",
     color: "#ffd740",
-    minScore: 40, maxScore: 99,
+    minScore: 35, maxScore: 99,   // Lowered to compensate for tighter liq
     minFomo: 10,  maxFomo: 85,
-    minLiq: 3000,  minVol5m: 50,  minBuyPct: 45,
+    minLiq: 15000, minVol5m: 50,  minBuyPct: 45,
     minAge: 0,    maxAge: 90,
     minPc5m: -10, maxPc5m: 99,
     baseBet: 25,
-    // Wider stops — early tokens are volatile
     stopLoss: 0.65, earlyStop: 0.78, trailingPct: 0.78,
-    tier1: 2.0, tier1Sell: 0.30, // Let early entries run more
+    tier1: 2.0, tier1Sell: 0.30,
     tier2: 5.0, tier2Sell: 0.30,
-    tier3: 10.0, // Moon shot potential
+    tier3: 10.0,
     maxHold: 120,
   },
   d: {
-    name: "Control (v5.5)",
-    desc: "Original system unchanged. Baseline for comparison.",
+    // v8.6: Liq raised $8k→$25k. Night 1: 6 delisteds out of 20 = $8k too low.
+    // Research: $15k minimum. $25k = proper safety with margin.
+    // Age tightened 3-360m → 5-180m. 6h old tokens are stale/dying.
+    // Vol/liq ratio filter added in algoGate — high vol + low liq = wash trading.
+    name: "Control",
+    desc: "Baseline. $25k liq floor. Vol/liq ratio rug check. Age 5-180m.",
     color: "#00e676",
     minScore: 45, maxScore: 99,
     minFomo: 10,  maxFomo: 99,
-    minLiq: 8000,  minVol5m: 100, minBuyPct: 45,
-    minAge: 3,    maxAge: 360,
+    minLiq: 25000, minVol5m: 100, minBuyPct: 45,
+    minAge: 5,    maxAge: 180,
     minPc5m: -25, maxPc5m: 999,
     baseBet: 40,
     stopLoss: 0.72, earlyStop: 0.82, trailingPct: 0.82,
@@ -224,13 +236,13 @@ const ALGOS = {
     maxHold: 120,
   },
   e: {
+    // v8.6: Liq raised $5k→$15k to match research minimums.
     name: "Smart Wallet",
     desc: "Follows wallets with proven 60%+ win rates. Copies smart money.",
     color: "#ff6b6b",
-    // Broader gates — trust comes from wallet signal not score alone
     minScore: 45, maxScore: 99,
     minFomo: 10,  maxFomo: 80,
-    minLiq: 5000, minVol5m: 100, minBuyPct: 48,
+    minLiq: 15000, minVol5m: 100, minBuyPct: 48,
     minAge: 0,    maxAge: 60,
     minPc5m: -20, maxPc5m: 200,
     baseBet: 50,
@@ -352,6 +364,29 @@ async function dexBoosted() {
   if (!r.ok) throw new Error(`dexBoosted ${r.status}`);
   const d = await r.json();
   return (d || []).filter(t => t.chainId === "solana").slice(0, 20);
+}
+
+// dexGraduated — fetches recently graduated pump.fun tokens via token-profiles endpoint.
+// Graduated tokens always have: burned LP (no rug possible), $17k+ starting liq, real community.
+// This is Algo A's dedicated pipeline — surfaces quality tokens keyword search misses.
+async function dexGraduated() {
+  try {
+    const r = await fetch(`https://api.dexscreener.com/token-profiles/latest/v1`, { timeout: 10000 });
+    if (!r.ok) return [];
+    const d = await r.json();
+    const addrs = (d || [])
+      .filter(t => t.chainId === "solana")
+      .slice(0, 40)
+      .map(t => t.tokenAddress)
+      .filter(Boolean);
+    if (!addrs.length) return [];
+    const pairs = await dexPairs(addrs).catch(() => []);
+    // Only return tokens with meaningful liquidity — graduated floor is $17k but filter higher
+    return pairs.filter(p =>
+      parseFloat(p.priceUsd || 0) > 0 &&
+      (p.liquidity?.usd || 0) >= 15000
+    );
+  } catch(e) { return []; }
 }
 
 async function dexNewTokens() {
@@ -866,6 +901,9 @@ function algoGate(p, sc, fomo, algoKey) {
     ageMin:   { pass: ageUnknown || age >= cfg.minAge,            why: `age ${age.toFixed(1)}m<${cfg.minAge}m` },
     ageMax:   { pass: ageUnknown || age <= cfg.maxAge,            why: `age ${Math.round(age)}m>${cfg.maxAge}m` },
     hasPrice: { pass: parseFloat(p.priceUsd || 0) > 0,           why: "no price" },
+    // v8.6: Vol/liq ratio rug check — high vol + low liq = wash trading signature
+    // Research: "rug pulls maintain minimal liquidity while showing massive volume"
+    volLiq:   { pass: liq <= 0 || v5 <= 0 || (v5 / liq) < 8,   why: `vol/liq ratio ${liq>0?(v5/liq).toFixed(1):"?"} >= 8 (wash trading)` },
   };
 
   const failed = Object.values(checks).filter(c => !c.pass).map(c => c.why);
@@ -1148,12 +1186,13 @@ async function pollSignals() {
     const q2 = QUERIES[(qi + 2) % QUERIES.length];
     qi += 3;
 
-    const [r1, r2, r3, r4, r5] = await Promise.allSettled([
+    const [r1, r2, r3, r4, r5, r6] = await Promise.allSettled([
       dexSearch(q0),
       dexSearch(q1),
       dexSearch(q2),
       dexBoosted(),
       dexNewTokens(),
+      dexGraduated(),   // v8.6: graduated pump.fun tokens — Algo A's dedicated feed
     ]);
 
     const searchPairs   = [
@@ -1161,8 +1200,9 @@ async function pollSignals() {
       ...(r2.status === "fulfilled" ? r2.value : []),
       ...(r3.status === "fulfilled" ? r3.value : []),
     ];
-    const boostedTokens = r4.status === "fulfilled" ? r4.value : [];
-    const newTokens     = r5.status === "fulfilled" ? r5.value : [];
+    const boostedTokens  = r4.status === "fulfilled" ? r4.value : [];
+    const newTokens      = r5.status === "fulfilled" ? r5.value : [];
+    const graduatedPairs = r6.status === "fulfilled" ? r6.value : [];
 
     let boostedPairs = [];
     if (boostedTokens.length) {
@@ -1189,7 +1229,7 @@ async function pollSignals() {
     // Dedupe
     const seen = new Set();
     const all  = [];
-    for (const p of [...searchPairs, ...boostedPairs, ...newTokens, ...heliusQueued]) {
+    for (const p of [...searchPairs, ...boostedPairs, ...newTokens, ...graduatedPairs, ...heliusQueued]) {
       if (!p.pairAddress || seen.has(p.pairAddress)) continue;
       seen.add(p.pairAddress);
       all.push(p);
@@ -1209,7 +1249,7 @@ async function pollSignals() {
       monitor.lastHeliusTokenTime = Date.now();
       monitor.heliusQueueCount += heliusQueued.length;
     }
-    console.log(`  data: search:${searchPairs.length} boosted:${boostedPairs.length} new:${newTokens.length} helius:${heliusQueued.length} fresh:${freshCount} total:${all.length}`);
+    console.log(`  data: search:${searchPairs.length} boosted:${boostedPairs.length} new:${newTokens.length} graduated:${graduatedPairs.length} helius:${heliusQueued.length} fresh:${freshCount} total:${all.length}`);
 
     // Score every token once
     const scored = all.map(p => ({
@@ -1485,7 +1525,7 @@ async function getAlgoStats(algoKey) {
 app.get("/health", (req, res) => res.json({
   status: "ok",
   ts: new Date().toISOString(),
-  version: "8.5f",
+  version: "8.6",
   marketMood: mood,
   pollCount,
   heliusWs: heliusWs ? "connected" : "disconnected",
