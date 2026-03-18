@@ -82,7 +82,7 @@ async function initDB() {
     const count = await db(`SELECT COUNT(*) FROM trades_${algo}`);
     console.log(`  trades_${algo}: ${count.rows[0].count} rows`);
   }
-  console.log("DB ready v8.1 — 5 algo tables (A-E) verified");
+  console.log("DB ready v8.2 — 5 algo tables (A-E) verified");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -184,7 +184,7 @@ const ALGOS = {
     minScore: 50, maxScore: 99,
     minFomo: 15,  maxFomo: 99,
     minLiq: 1000, minVol5m: 100, minBuyPct: 50,
-    minAge: 0,    maxAge: 90,
+    minAge: 0,    maxAge: 999,
     minPc5m: -25, maxPc5m: 999,
     baseBet: 40,
     stopLoss: 0.72, earlyStop: 0.82, trailingPct: 0.82,
@@ -540,33 +540,47 @@ function connectHeliusWs() {
   }
 }
 
+// Queue of token mints detected by Helius — fetch from DexScreener on next poll
+const heliusTokenQueue = new LRUMap(200);
+
 function processHeliusLog(result) {
   if (!result) return;
   const logs = result?.value?.logs || [];
-  const sig  = result?.value?.signature;
+  const accounts = result?.value?.accounts || [];
 
   // Detect new token creation on pump.fun
   const isCreate = logs.some(l =>
-    l.includes("Create") || l.includes("initialize") || l.includes("MintTo")
+    l.includes("InitializeMint") || l.includes("Create") || l.includes("MintTo")
   );
+
+  // Extract token mint from accounts — on pump.fun it's usually accounts[1] or [2]
+  // Pump.fun accounts order: [signer, mint, bondingCurve, associatedBondingCurve, ...]
+  if (isCreate && accounts.length >= 2) {
+    // Try each account as potential mint (filter out known program addresses)
+    const knownPrograms = new Set([
+      PUMPFUN_PROGRAM,
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", // SPL Token
+      "11111111111111111111111111111111",               // System program
+      "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe8bXH",  // ATA program
+      "SysvarRent111111111111111111111111111111111",
+    ]);
+    for (const addr of accounts.slice(1, 4)) {
+      if (addr && !knownPrograms.has(addr) && addr.length >= 32) {
+        heliusTokenQueue.set(addr, Date.now());
+        console.log(`[HELIUS] New token queued: ${addr.slice(0,12)}...`);
+        break;
+      }
+    }
+  }
 
   // Detect smart wallet buys
   const isBuy = logs.some(l =>
     l.includes("buy") || l.includes("Buy") || l.includes("swap")
   );
 
-  if (isCreate) {
-    console.log(`[HELIUS] New pump.fun token detected: ${sig?.slice(0,8)}...`);
-    // Will be picked up by DexScreener in the next 30-120 seconds
-    // The value is that we know to watch for it
-  }
-
-  if (isBuy && result?.value?.accounts) {
-    const accounts = result.value.accounts || [];
-    const walletAddr = accounts[0]; // First account is usually the signer
-
+  if (isBuy && accounts.length > 0) {
+    const walletAddr = accounts[0];
     if (walletAddr && SMART_WALLETS.has(walletAddr)) {
-      // Find the token being bought — usually in accounts[1] or from logs
       const tokenMint = accounts.find(a => a !== walletAddr && a !== PUMPFUN_PROGRAM);
       if (tokenMint) {
         console.log(`[HELIUS] Smart wallet ${walletAddr.slice(0,8)}... bought ${tokenMint.slice(0,8)}...`);
@@ -1114,16 +1128,32 @@ async function pollSignals() {
       boostedPairs = await dexPairs(addrs).catch(() => []);
     }
 
+    // Fetch any tokens queued from Helius websocket
+    const heliusQueued = [];
+    if (heliusTokenQueue.map.size > 0) {
+      const queuedMints = [...heliusTokenQueue.map.keys()].slice(0, 20);
+      try {
+        const heliusPairs = await dexPairs(queuedMints).catch(() => []);
+        for (const p of heliusPairs) {
+          if (parseFloat(p.priceUsd || 0) > 0) {
+            heliusQueued.push(p);
+            heliusTokenQueue.map.delete(p.baseToken?.address || p.pairAddress);
+          }
+        }
+        if (heliusQueued.length) console.log(`  [HELIUS] ${heliusQueued.length} queued tokens fetched`);
+      } catch(e) { /* continue */ }
+    }
+
     // Dedupe
     const seen = new Set();
     const all  = [];
-    for (const p of [...searchPairs, ...boostedPairs, ...newTokens]) {
+    for (const p of [...searchPairs, ...boostedPairs, ...newTokens, ...heliusQueued]) {
       if (!p.pairAddress || seen.has(p.pairAddress)) continue;
       seen.add(p.pairAddress);
       all.push(p);
     }
 
-    console.log(`  data: search:${searchPairs.length} boosted:${boostedPairs.length} new:${newTokens.length} total:${all.length}`);
+    console.log(`  data: search:${searchPairs.length} boosted:${boostedPairs.length} new:${newTokens.length} helius:${heliusQueued.length} total:${all.length}`);
 
     // Score every token once
     const scored = all.map(p => ({
@@ -1387,7 +1417,7 @@ async function getAlgoStats(algoKey) {
 app.get("/health", (req, res) => res.json({
   status: "ok",
   ts: new Date().toISOString(),
-  version: "8.1",
+  version: "8.2",
   marketMood: mood,
   pollCount,
   heliusWs: heliusWs ? "connected" : "disconnected",
@@ -1550,7 +1580,7 @@ app.get("*", (req, res) => {
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR LAB v8.1 | Port:${PORT}`);
+  console.log(`\nS0NAR LAB v8.2 | Port:${PORT}`);
   console.log(`DB:${process.env.DATABASE_URL?"connected":"MISSING"}`);
   console.log(`HELIUS:${HELIUS_KEY?"key present":"MISSING - websocket disabled"}`);
   console.log(`Algos: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name} E=${ALGOS.e.name}`);
