@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — WAVE RIDER v9.1
+//  S0NAR — WAVE RIDER v9.2
 //  4-Strategy momentum trading: ride the wave, get out with profit.
 //  Strategy: find coins already moving, enter early in the move,
 //  exit before the peak. Not sniping launches. Not holding bags.
@@ -86,7 +86,7 @@ async function initDB() {
     const cnt = await db(`SELECT COUNT(*) FROM trades_${k}`);
     console.log(`  trades_${k}: ${cnt.rows[0].count} rows`);
   }
-  console.log("DB ready — v9.1 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
+  console.log("DB ready — v9.2 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -920,15 +920,13 @@ async function pollSignals() {
 
         const gate = algoGate(p, sc, fomo, z, algoKey);
 
-        // Log this signal for debug visibility
-        const skipReason = !gate.pass
-          ? gate.failed.join("; ")
-          : !rug.pass
-          ? rug.warnings.join("; ")
-          : null;
-        logSig(algoKey, p, sc, fomo, gate.pass && rug.pass, skipReason);
-
-        if (!gate.pass || !rug.pass) continue;
+        if (!gate.pass || !rug.pass) {
+          const skipReason = !gate.pass
+            ? gate.failed.join("; ")
+            : rug.warnings.join("; ");
+          logSig(algoKey, p, sc, fomo, false, skipReason);
+          continue;
+        }
 
         // Already traded this token recently?
         const already = await hadTrade(
@@ -937,12 +935,18 @@ async function pollSignals() {
           p.baseToken?.symbol || "???",
           p.baseToken?.name   || ""
         );
-        if (already) continue;
+        if (already) {
+          logSig(algoKey, p, sc, fomo, false, "already_traded");
+          continue;
+        }
 
         // Max 2 algos in same token (limits concentrated rug exposure)
         const tokenKey = p.baseToken?.address || p.pairAddress;
         const existing = crossAlgoExposure.get(tokenKey);
-        if (existing && existing.size >= 2 && !existing.has(algoKey)) continue;
+        if (existing && existing.size >= 2 && !existing.has(algoKey)) {
+          logSig(algoKey, p, sc, fomo, false, "cross_algo_limit");
+          continue;
+        }
 
         // BLOCKING rugcheck — requires token mint address
         const tokenMint = p.baseToken?.address;
@@ -953,6 +957,7 @@ async function pollSignals() {
 
         const rugResult = await checkRugcheck(tokenMint);
         if (!rugResult.pass) {
+          logSig(algoKey, p, sc, fomo, false, `rugcheck:[${rugResult.flags.join(",")}]`);
           console.log(
             `  [${algoKey.toUpperCase()}] RUG BLOCKED ${p.baseToken?.symbol} ` +
             `[${rugResult.flags.join(",")}]`
@@ -972,6 +977,8 @@ async function pollSignals() {
           });
 
         if (trade) {
+          // Log the actual entry
+          logSig(algoKey, p, sc, fomo, true, null);
           entries[algoKey]++;
           const age = p.pairCreatedAt
             ? ((Date.now() - p.pairCreatedAt) / 60000).toFixed(0)
@@ -1192,7 +1199,7 @@ app.get("/health", (req, res) => {
   res.json({
     status:     "ok",
     ts:         new Date().toISOString(),
-    version:    "9.1",
+    version:    "9.2",
     marketMood: mood,
     pollCount,
     algos: Object.fromEntries(
@@ -1390,12 +1397,12 @@ app.post("/api/wipe", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Wave Rider v9.1 backend running.");
+  res.status(200).send("S0NAR Wave Rider v9.2 backend running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR WAVE RIDER v9.1 | Port:${PORT}`);
+  console.log(`\nS0NAR WAVE RIDER v9.2 | Port:${PORT}`);
   console.log(`DB: ${process.env.DATABASE_URL ? "connected" : "MISSING — check env vars"}`);
   console.log(`Strategies: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name}`);
   console.log(`Poll every ${FETCH_MS}ms | Check positions every ${CHECK_MS}ms\n`);
