@@ -134,14 +134,14 @@ if (hasDist) {
 const ALGOS = {
   a: {
     name: "WAVE",
-    desc: "Coins 15-90min with building momentum. FOMO 40-70, price +8-45%. Ride the wave before retail floods in.",
+    desc: "Coins 15-90min with building momentum. FOMO 30-72, price +5-50%. Ride the wave before retail floods in.",
     color: "#00e5ff",
-    minScore: 55, maxScore: 99,
-    minFomo: 40,  maxFomo: 70,
-    minLiq: 20000, minVol5m: 600, minBuyPct: 55,
-    minAge: 15,   maxAge: 90,
-    minPc5m: 8,   maxPc5m: 45,
-    minZScore: 0,                 // No z requirement — momentum is captured in FOMO/price
+    minScore: 45, maxScore: 99,  // was 55 — too strict, missing real setups
+    minFomo: 30,  maxFomo: 72,   // was 40-70 — widened to catch more momentum
+    minLiq: 10000, minVol5m: 300, minBuyPct: 52, // was 20k/600/55 — too high for normal market
+    minAge: 10,   maxAge: 120,   // was 15-90 — widened both ends
+    minPc5m: 5,   maxPc5m: 60,  // was 8-45 — lowered entry, raised ceiling
+    minZScore: 0,
     baseBet: 50,
     stopLoss: 0.84,
     earlyStop: 0.88, earlyStopMinutes: 5,
@@ -153,14 +153,14 @@ const ALGOS = {
   },
   b: {
     name: "SURGE",
-    desc: "Abnormal volume spike (z-score>2) on any age coin. Something is happening — get in fast.",
+    desc: "Abnormal volume spike on any age coin. z-score>1.5, something is happening — get in.",
     color: "#ff6d00",
-    minScore: 50, maxScore: 99,
-    minFomo: 35,  maxFomo: 75,
-    minLiq: 15000, minVol5m: 1000, minBuyPct: 53,
-    minAge: 5,    maxAge: 360,
-    minPc5m: 5,   maxPc5m: 60,
-    minZScore: 2.0,               // REQUIRED: volume must be statistically abnormal
+    minScore: 45, maxScore: 99,
+    minFomo: 20,  maxFomo: 82,   // widened — normal market fomo sits lower
+    minLiq: 8000, minVol5m: 300, minBuyPct: 50, // vol was 500 — too high, lowered to 300
+    minAge: 3,    maxAge: 480,
+    minPc5m: 2,   maxPc5m: 82,  // widened
+    minZScore: 1.5,
     baseBet: 40,
     stopLoss: 0.82,
     earlyStop: 0.86, earlyStopMinutes: 5,
@@ -172,13 +172,13 @@ const ALGOS = {
   },
   c: {
     name: "STEADY",
-    desc: "High liq + low FOMO + quiet price. The BGOLD pattern: slow build before retail notices.",
+    desc: "Decent liq + low-mid FOMO + quiet price. Slow build before retail notices.",
     color: "#69f0ae",
-    minScore: 58, maxScore: 82,
-    minFomo: 15,  maxFomo: 48,
-    minLiq: 35000, minVol5m: 300, minBuyPct: 52,
-    minAge: 20,   maxAge: 150,
-    minPc5m: -5,  maxPc5m: 18,
+    minScore: 48, maxScore: 85,  // was 58-82 — too narrow
+    minFomo: 10,  maxFomo: 55,   // was 15-48 — widened
+    minLiq: 15000, minVol5m: 150, minBuyPct: 50, // was 35k/300/52 — 35k liq almost never hit
+    minAge: 15,   maxAge: 240,   // was 20-150 — widened
+    minPc5m: -8,  maxPc5m: 25,  // was -5 to 18
     minZScore: 0,
     baseBet: 55,
     stopLoss: 0.74,
@@ -191,13 +191,13 @@ const ALGOS = {
   },
   d: {
     name: "ROCKET",
-    desc: "High FOMO (55-80), price +20-80%. Jump on the rocket early, quick exit before gravity hits.",
+    desc: "High FOMO (35-85), price +5-100%. Jump on strong momentum, quick exit.",
     color: "#ff1744",
-    minScore: 52, maxScore: 99,
-    minFomo: 55,  maxFomo: 80,
-    minLiq: 12000, minVol5m: 800, minBuyPct: 57,
-    minAge: 5,    maxAge: 60,
-    minPc5m: 20,  maxPc5m: 80,
+    minScore: 45, maxScore: 99,
+    minFomo: 35,  maxFomo: 85,   // was 45 — lowered, 45 barely hits in normal market
+    minLiq: 8000, minVol5m: 300, minBuyPct: 52, // was 400/54 — too strict
+    minAge: 3,    maxAge: 120,   // was 90 — widened
+    minPc5m: 5,   maxPc5m: 100, // was 10 — lowered entry threshold
     minZScore: 0,
     baseBet: 35,
     stopLoss: 0.80,
