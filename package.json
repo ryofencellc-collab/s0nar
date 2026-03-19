@@ -1,7 +1,7 @@
 {
   "name": "s0nar",
-  "version": "9.0.0",
-  "description": "S0NAR Wave Rider v9.0 — 4-Strategy Momentum Trading",
+  "version": "9.1.0",
+  "description": "S0NAR Wave Rider v9.1 — 4-Strategy Momentum Trading",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
