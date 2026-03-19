@@ -1,4 +1,4 @@
-// S0NAR App.jsx v9.1 — Wave Rider 4-Strategy
+// S0NAR App.jsx v9.4 — Wave Rider 4-Strategy
 import React, { useState, useEffect } from "react";
 
 // ── CONSTANTS ──────────────────────────────────────────────
@@ -113,7 +113,7 @@ function LoginScreen({ onLogin }) {
       justifyContent:"center",fontFamily:"'Courier New',monospace"}}>
       <div style={{width:300,textAlign:"center",padding:"0 20px"}}>
         <div style={{fontSize:26,fontWeight:900,letterSpacing:4,color:G,marginBottom:6}}>◉ S0NAR</div>
-        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>WAVE RIDER v9.1</div>
+        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>WAVE RIDER v9.4</div>
         <div style={{fontSize:8,color:ALGO_COLORS.a,marginBottom:30}}>4-STRATEGY LAB</div>
 
         <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"20px"}}>
@@ -201,6 +201,7 @@ function AppInner({ token, headers, onLogout }) {
   const [wipePw,    setWipePw]   = useState("");
   const [wipeMsg,   setWipeMsg]  = useState("");
   const [debugData, setDebugData]= useState(null);
+  const [sysData,   setSysData]   = useState(null);
 
   async function fetchAll() {
     try {
@@ -235,6 +236,13 @@ function AppInner({ token, headers, onLogout }) {
       const d = await fetch(`${API}/api/debug/${algoKey}`, { headers }).then(r=>r.json());
       setDebugData(d);
     } catch {}
+  }
+
+  async function fetchSystem() {
+    try {
+      const d = await fetch(`${API}/api/system`, { headers }).then(r=>r.json());
+      setSysData(d);
+    } catch(e) { setSysData({ error: e.message }); }
   }
 
   async function doWipe() {
@@ -327,7 +335,7 @@ function AppInner({ token, headers, onLogout }) {
           </div>
           <div style={{textAlign:"right",flexShrink:0,paddingLeft:8}}>
             <div style={{fontSize:7,color:DIM}}>WAVE RIDER</div>
-            <div style={{fontSize:10,fontWeight:900,color:G}}>v9.1</div>
+            <div style={{fontSize:10,fontWeight:900,color:G}}>v9.4</div>
             <button onClick={onLogout}
               style={{fontSize:6,color:DIM,background:"transparent",border:"none",cursor:"pointer",letterSpacing:1}}>
               LOCK
@@ -339,8 +347,8 @@ function AppInner({ token, headers, onLogout }) {
       {/* ── TABS ── */}
       <div style={{display:"flex",background:CARD,borderBottom:`1px solid ${BORDER}`,
         overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
-        {[["lab","LAB"],["trades","TRADES"],["compare","COMPARE"],["debug","DEBUG"],["settings","⚙"]].map(([v,l]) => (
-          <button key={v} className="btn" onClick={()=>{setView(v);if(v==="debug")fetchDebug(selAlgo);}}
+        {[["lab","LAB"],["trades","TRADES"],["compare","COMPARE"],["debug","DEBUG"],["system","SYS"],["settings","⚙"]].map(([v,l]) => (
+          <button key={v} className="btn" onClick={()=>{setView(v);if(v==="debug")fetchDebug(selAlgo);if(v==="system")fetchSystem();}}
             style={{flex:"0 0 auto",padding:"8px 10px",fontSize:8,
               color:view===v?G:DIM,borderBottom:`2px solid ${view===v?G:"transparent"}`,
               background:"transparent",whiteSpace:"nowrap"}}>
@@ -825,6 +833,149 @@ function AppInner({ token, headers, onLogout }) {
         </div>
       )}
 
+
+      {/* ══════════════════════════════════════════════════════
+          SYSTEM — full visibility, no Render logs needed
+         ══════════════════════════════════════════════════════ */}
+      {view==="system" && (
+        <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div style={{fontSize:7,color:DIM,letterSpacing:2}}>SYSTEM STATUS</div>
+            <button className="btn" onClick={fetchSystem}
+              style={{fontSize:8,color:B,background:"transparent",border:`1px solid ${B}44`,padding:"3px 8px",borderRadius:4}}>↻ REFRESH</button>
+          </div>
+
+          {!sysData && (
+            <div style={{textAlign:"center",padding:"40px",color:DIM,fontSize:9}}>Tap refresh to load</div>
+          )}
+
+          {sysData?.error && (
+            <div style={{background:`${R}18`,border:`1px solid ${R}44`,borderRadius:8,padding:"12px",marginBottom:10,fontSize:9,color:R}}>
+              ERROR: {sysData.error}
+            </div>
+          )}
+
+          {sysData && !sysData.error && (
+            <>
+              {/* API Health */}
+              <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px",marginBottom:10}}>
+                <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:10}}>API HEALTH</div>
+                {[
+                  {l:"DEXSCREENER", d:sysData.apis?.dexscreener},
+                  {l:"RUGCHECK",    d:sysData.apis?.rugcheck},
+                  {l:"DATABASE",    d:sysData.apis?.database},
+                ].map(({l,d})=>{
+                  const ok = d?.ok;
+                  const c  = ok===true?G:ok===false?R:DIM;
+                  return (
+                    <div key={l} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,paddingBottom:8,borderBottom:`1px solid ${BORDER}`}}>
+                      <div>
+                        <div style={{fontSize:9,fontWeight:700,color:c}}>{l}</div>
+                        {d?.err && <div style={{fontSize:7,color:R,marginTop:2}}>{d.err}</div>}
+                        {d?.lastAt && <div style={{fontSize:6,color:DIM,marginTop:1}}>{new Date(d.lastAt).toLocaleTimeString()}</div>}
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontSize:11,fontWeight:900,color:c}}>{ok===true?"●  OK":ok===false?"● DOWN":"● --"}</div>
+                        {d?.lastMs!=null && <div style={{fontSize:7,color:DIM}}>{d.lastMs}ms</div>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Entry Funnel */}
+              <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px",marginBottom:10}}>
+                <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:10}}>ENTRY FUNNEL (since restart)</div>
+                <div style={{display:"grid",gridTemplateColumns:"60px 1fr 1fr 1fr 1fr",gap:4,marginBottom:6}}>
+                  <div style={{fontSize:6,color:DIM}}></div>
+                  {["a","b","c","d"].map(k=>(
+                    <div key={k} style={{fontSize:7,color:ALGO_COLORS[k],textAlign:"center",fontWeight:700}}>{ALGO_NAMES[k].slice(0,5)}</div>
+                  ))}
+                </div>
+                {["seen","gate","rugPass","entered"].map(stage=>(
+                  <div key={stage} style={{display:"grid",gridTemplateColumns:"60px 1fr 1fr 1fr 1fr",gap:4,marginBottom:4}}>
+                    <div style={{fontSize:7,color:DIM,textTransform:"uppercase"}}>{stage}</div>
+                    {["a","b","c","d"].map(k=>{
+                      const v = sysData.funnel?.[k]?.[stage] ?? 0;
+                      const seen = sysData.funnel?.[k]?.seen || 1;
+                      const pct  = stage==="seen"?100:Math.round((v/seen)*100);
+                      const c    = stage==="entered"?(v>0?G:DIM):stage==="rugPass"?B:DIM;
+                      return (
+                        <div key={k} style={{textAlign:"center"}}>
+                          <div style={{fontSize:11,fontWeight:900,color:c}}>{v}</div>
+                          {stage!=="seen" && <div style={{fontSize:6,color:DIM}}>{pct}%</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+
+              {/* Rugcheck recent results */}
+              {sysData.apis?.rugcheck?.recentResults?.length > 0 && (
+                <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px",marginBottom:10}}>
+                  <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:8}}>LAST RUGCHECK RESULTS</div>
+                  {sysData.apis.rugcheck.recentResults.map((r,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                      <div>
+                        <span style={{fontSize:8,color:"white",fontFamily:"monospace"}}>{r.addr}</span>
+                        {r.flags?.length>0 && <span style={{fontSize:7,color:R,marginLeft:6}}>[{r.flags.join(",")}]</span>}
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                        <span style={{fontSize:7,color:DIM}}>sc:{r.score}</span>
+                        <span style={{fontSize:9,fontWeight:700,color:r.pass?G:R}}>{r.pass?"PASS":"BLOCK"}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Recent errors */}
+              {sysData.lastErrors?.length > 0 && (
+                <div style={{background:CARD,border:`1px solid ${R}33`,borderRadius:10,padding:"12px",marginBottom:10}}>
+                  <div style={{fontSize:7,color:R,letterSpacing:2,marginBottom:8}}>RECENT ERRORS</div>
+                  {sysData.lastErrors.map((e,i)=>(
+                    <div key={i} style={{marginBottom:6,paddingBottom:6,borderBottom:`1px solid ${BORDER}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <span style={{fontSize:8,color:Y,fontWeight:700}}>{e.source?.toUpperCase()}</span>
+                        <span style={{fontSize:6,color:DIM}}>{e.at?new Date(e.at).toLocaleTimeString():""}</span>
+                      </div>
+                      <div style={{fontSize:7,color:DIM,marginTop:2}}>{e.msg}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Paste box */}
+              <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px",marginBottom:10}}>
+                <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:6}}>SEND TO CLAUDE</div>
+                <div style={{fontSize:8,color:DIM,marginBottom:8}}>Tap refresh above, then copy everything below and paste it to Claude for instant diagnosis.</div>
+                <textarea readOnly
+                  value={JSON.stringify(sysData, null, 2)}
+                  style={{width:"100%",height:120,background:"#060a0d",border:`1px solid ${BORDER}`,
+                    borderRadius:6,color:"#b0c8d8",fontFamily:"monospace",fontSize:7,
+                    padding:"8px",resize:"none",outline:"none"}}
+                />
+              </div>
+
+              {/* Stats summary */}
+              <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px"}}>
+                <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:8}}>SERVER INFO</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontSize:7,color:DIM}}>
+                  <span>Version: <span style={{color:"white"}}>v{sysData.version}</span></span>
+                  <span>Uptime: <span style={{color:"white"}}>{Math.round((sysData.uptime||0)/60)}m</span></span>
+                  <span>Polls: <span style={{color:"white"}}>{sysData.pollCount}</span></span>
+                  <span>Mood: <span style={{color:Y}}>{sysData.marketMood}</span></span>
+                  {["a","b","c","d"].map(k=>(
+                    <span key={k}>Open-{k.toUpperCase()}: <span style={{color:ALGO_COLORS[k]}}>{sysData.openTrades?.[k]??0}</span></span>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ── WIPE MODAL ── */}
       {wipeModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",
@@ -870,4 +1021,4 @@ function AppInner({ token, headers, onLogout }) {
   );
 }
 
-// end of App.jsx v9.1
+// end of App.jsx v9.4
