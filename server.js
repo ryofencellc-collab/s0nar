@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — WAVE RIDER v9.2
+//  S0NAR — WAVE RIDER v9.4
 //  4-Strategy momentum trading: ride the wave, get out with profit.
 //  Strategy: find coins already moving, enter early in the move,
 //  exit before the peak. Not sniping launches. Not holding bags.
@@ -31,9 +31,25 @@ const pool = new Pool({
 });
 
 async function db(sql, params = []) {
-  const c = await pool.connect();
-  try { return await c.query(sql, params); }
-  finally { c.release(); }
+  try {
+    const c = await pool.connect();
+    try {
+      const r = await c.query(sql, params);
+      if (typeof sysStatus !== 'undefined') {
+        sysStatus.database.ok     = true;
+        sysStatus.database.lastAt = new Date().toISOString();
+        sysStatus.database.err    = null;
+      }
+      return r;
+    } finally { c.release(); }
+  } catch (e) {
+    if (typeof sysStatus !== 'undefined') {
+      sysStatus.database.ok  = false;
+      sysStatus.database.err = e.message;
+      sysErr("database", e.message);
+    }
+    throw e;
+  }
 }
 
 const TRADE_COLS = `
@@ -86,7 +102,7 @@ async function initDB() {
     const cnt = await db(`SELECT COUNT(*) FROM trades_${k}`);
     console.log(`  trades_${k}: ${cnt.rows[0].count} rows`);
   }
-  console.log("DB ready — v9.2 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
+  console.log("DB ready — v9.4 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -252,6 +268,27 @@ const fomoFadeCounter   = new Map();
 const delistMissCounter = new Map();
 const crossAlgoExposure = new Map(); // tokenAddr → Set<algoKey>
 
+// ── SYSTEM STATUS (visible in app, no Render logs needed) ──
+const sysStatus = {
+  dexscreener: { ok: null, lastMs: null, lastAt: null, err: null },
+  rugcheck:    { ok: null, lastMs: null, lastAt: null, err: null, passRate: null },
+  database:    { ok: null, lastAt: null, err: null },
+  lastErrors:  [],   // rolling last 20 errors
+  rugLog:      [],   // last 20 rugcheck results
+  funnel:      {     // per-algo entry funnel counts since startup
+    a: { seen:0, gate:0, rugPass:0, entered:0 },
+    b: { seen:0, gate:0, rugPass:0, entered:0 },
+    c: { seen:0, gate:0, rugPass:0, entered:0 },
+    d: { seen:0, gate:0, rugPass:0, entered:0 },
+  },
+};
+
+function sysErr(source, msg) {
+  const entry = { source, msg, at: new Date().toISOString() };
+  sysStatus.lastErrors.unshift(entry);
+  if (sysStatus.lastErrors.length > 20) sysStatus.lastErrors.pop();
+}
+
 // ── SEARCH QUERIES ─────────────────────────────────────────
 const QUERIES = [
   "pump.fun", "pumpfun", "pump fun sol",
@@ -267,15 +304,34 @@ const QUERIES = [
 
 // ── DEXSCREENER API ────────────────────────────────────────
 async function dexSearch(q) {
-  const r = await fetch(
-    `https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(q)}`,
-    { timeout: 10000 }
-  );
-  if (!r.ok) throw new Error(`dexSearch HTTP ${r.status}`);
-  const d = await r.json();
-  return (d?.pairs || []).filter(
-    p => p.chainId === "solana" && parseFloat(p.priceUsd || 0) > 0
-  );
+  const t0 = Date.now();
+  try {
+    const r = await fetch(
+      `https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(q)}`,
+      { timeout: 10000 }
+    );
+    sysStatus.dexscreener.lastMs = Date.now() - t0;
+    sysStatus.dexscreener.lastAt = new Date().toISOString();
+    if (!r.ok) {
+      sysStatus.dexscreener.ok  = false;
+      sysStatus.dexscreener.err = `HTTP ${r.status}`;
+      sysErr("dexscreener", `dexSearch HTTP ${r.status}`);
+      throw new Error(`dexSearch HTTP ${r.status}`);
+    }
+    const d = await r.json();
+    sysStatus.dexscreener.ok  = true;
+    sysStatus.dexscreener.err = null;
+    return (d?.pairs || []).filter(
+      p => p.chainId === "solana" && parseFloat(p.priceUsd || 0) > 0
+    );
+  } catch (e) {
+    if (!sysStatus.dexscreener.err) {
+      sysStatus.dexscreener.ok  = false;
+      sysStatus.dexscreener.err = e.message;
+      sysErr("dexscreener", e.message);
+    }
+    throw e;
+  }
 }
 
 async function dexBoosted() {
@@ -313,41 +369,53 @@ async function dexPair(address) {
   return ps[0] || null;
 }
 
-// ── RUGCHECK API (blocking, fail-closed) ──────────────────
-// Any API error = block trade. LP unlocked = hard block.
-// Mint/freeze authority = hard block. Never fail open.
+// ── RUGCHECK API (fail-open on errors, block confirmed hard flags only) ──
+// API down / timeout / empty = PASS (fail open — never block trading on outage)
+// Mint authority / freeze authority / LP unlocked = hard block
 async function checkRugcheck(tokenAddress) {
-  if (!tokenAddress) return { score: -1, flags: ["no_address"], pass: false };
+  if (!tokenAddress) return { score: 0, flags: [], pass: true, apiStatus: "no_address" };
   if (rugCache.has(tokenAddress)) return rugCache.get(tokenAddress);
 
+  const t0 = Date.now();
   try {
     const r = await fetch(
       `https://api.rugcheck.xyz/v1/tokens/${tokenAddress}/report/summary`,
-      { timeout: 8000 }
+      { timeout: 6000 }
     );
+
+    sysStatus.rugcheck.lastMs = Date.now() - t0;
+    sysStatus.rugcheck.lastAt = new Date().toISOString();
+
+    // API error → fail open, log it, allow trade
     if (!r.ok) {
-      console.log(`[RUG] ${r.status} ${tokenAddress.slice(0, 10)} — blocking`);
-      return { score: -1, flags: ["api_error"], pass: false };
+      sysStatus.rugcheck.ok  = false;
+      sysStatus.rugcheck.err = `HTTP ${r.status}`;
+      sysErr("rugcheck", `HTTP ${r.status} for ${tokenAddress.slice(0,10)}`);
+      return { score: 0, flags: [], pass: true, apiStatus: `http_${r.status}` };
     }
 
     const d     = await r.json();
     const score = d?.score || 0;
 
-    // Empty = API issue or wrong address — block
+    // Empty response → fail open (API returned nothing useful)
     if (score === 0 && !d?.topHolders?.length && !d?.markets?.length) {
-      console.log(`[RUG] Empty response ${tokenAddress.slice(0, 10)} — blocking`);
-      return { score: -1, flags: ["empty_response"], pass: false };
+      sysStatus.rugcheck.ok  = false;
+      sysStatus.rugcheck.err = "empty_response";
+      sysErr("rugcheck", `Empty response for ${tokenAddress.slice(0,10)}`);
+      return { score: 0, flags: [], pass: true, apiStatus: "empty" };
     }
 
+    sysStatus.rugcheck.ok  = true;
+    sysStatus.rugcheck.err = null;
+
+    // Check hard flags only
     const flags = [];
     if (d?.mintAuthority)   flags.push("mint_authority");
     if (d?.freezeAuthority) flags.push("freeze_authority");
     if (d?.mutable)         flags.push("mutable_metadata");
 
-    // LP lock: must have at least one locked/burned market
-    const markets   = d?.markets || [];
-    let anyLocked   = false;
-    let anyUnlocked = false;
+    const markets = d?.markets || [];
+    let anyLocked = false, anyUnlocked = false;
     for (const m of markets) {
       const lp = m?.lp || {};
       if (lp.lpBurned || (lp.lpLockedPct || 0) >= 80) anyLocked = true;
@@ -355,24 +423,35 @@ async function checkRugcheck(tokenAddress) {
     }
     if (markets.length > 0 && anyUnlocked && !anyLocked) flags.push("lp_unlocked");
 
-    // Top holder concentration
     const top1  = d?.topHolders?.[0]?.pct || 0;
-    const top10 = (d?.topHolders || []).slice(0, 10)
-      .reduce((s, h) => s + (h.pct || 0), 0);
+    const top10 = (d?.topHolders || []).slice(0, 10).reduce((s, h) => s + (h.pct || 0), 0);
     if (top1  > 30) flags.push(`top1_${Math.round(top1)}pct`);
     if (top10 > 80) flags.push(`top10_${Math.round(top10)}pct`);
 
     const hardFlags = ["mint_authority", "freeze_authority", "lp_unlocked"];
-    const pass      = score < 500 && !flags.some(f => hardFlags.includes(f));
+    const pass      = !flags.some(f => hardFlags.includes(f));
 
-    const result = { score, flags, pass, top10: Math.round(top10) };
+    const result = { score, flags, pass, top10: Math.round(top10), apiStatus: "ok" };
     rugCache.set(tokenAddress, result);
-    console.log(`[RUG] ${tokenAddress.slice(0, 10)} sc:${score} pass:${pass} [${flags.join(",")}]`);
+
+    // Log to sysStatus for in-app visibility
+    sysStatus.rugLog.unshift({
+      addr: tokenAddress.slice(0, 12),
+      pass, flags, score,
+      at: new Date().toISOString(),
+    });
+    if (sysStatus.rugLog.length > 20) sysStatus.rugLog.pop();
+
     return result;
 
   } catch (e) {
-    console.log(`[RUG] Error ${tokenAddress.slice(0, 10)}: ${e.message} — blocking`);
-    return { score: -1, flags: ["network_error"], pass: false };
+    // Network error / timeout → fail open
+    sysStatus.rugcheck.ok  = false;
+    sysStatus.rugcheck.err = e.message;
+    sysStatus.rugcheck.lastMs = Date.now() - t0;
+    sysStatus.rugcheck.lastAt = new Date().toISOString();
+    sysErr("rugcheck", `${e.message} for ${tokenAddress.slice(0,10)}`);
+    return { score: 0, flags: [], pass: true, apiStatus: "timeout" };
   }
 }
 
@@ -920,6 +999,8 @@ async function pollSignals() {
 
         const gate = algoGate(p, sc, fomo, z, algoKey);
 
+        sysStatus.funnel[algoKey].seen++;
+
         if (!gate.pass || !rug.pass) {
           const skipReason = !gate.pass
             ? gate.failed.join("; ")
@@ -927,6 +1008,8 @@ async function pollSignals() {
           logSig(algoKey, p, sc, fomo, false, skipReason);
           continue;
         }
+
+        sysStatus.funnel[algoKey].gate++;
 
         // Already traded this token recently?
         const already = await hadTrade(
@@ -948,22 +1031,21 @@ async function pollSignals() {
           continue;
         }
 
-        // BLOCKING rugcheck — requires token mint address
+        // Token mint required for rugcheck
         const tokenMint = p.baseToken?.address;
-        if (!tokenMint) {
-          logSig(algoKey, p, sc, fomo, false, "no_token_mint_address");
+
+        // Rugcheck — fail-open on API errors, only blocks confirmed hard flags
+        const rugResult = tokenMint
+          ? await checkRugcheck(tokenMint)
+          : { score: 0, flags: [], pass: true, apiStatus: "no_mint" };
+
+        if (!rugResult.pass) {
+          logSig(algoKey, p, sc, fomo, false, `rug:[${rugResult.flags.join(",")}]`);
+          sysStatus.funnel[algoKey].rugPass; // stays at current value
           continue;
         }
 
-        const rugResult = await checkRugcheck(tokenMint);
-        if (!rugResult.pass) {
-          logSig(algoKey, p, sc, fomo, false, `rugcheck:[${rugResult.flags.join(",")}]`);
-          console.log(
-            `  [${algoKey.toUpperCase()}] RUG BLOCKED ${p.baseToken?.symbol} ` +
-            `[${rugResult.flags.join(",")}]`
-          );
-          continue;
-        }
+        sysStatus.funnel[algoKey].rugPass++;
 
         // All checks passed — enter the trade
         const trade = await insertTrade(algoKey, p, sc, fomo, rugResult.score)
@@ -977,8 +1059,8 @@ async function pollSignals() {
           });
 
         if (trade) {
-          // Log the actual entry
           logSig(algoKey, p, sc, fomo, true, null);
+          sysStatus.funnel[algoKey].entered++;
           entries[algoKey]++;
           const age = p.pairCreatedAt
             ? ((Date.now() - p.pairCreatedAt) / 60000).toFixed(0)
@@ -1199,7 +1281,7 @@ app.get("/health", (req, res) => {
   res.json({
     status:     "ok",
     ts:         new Date().toISOString(),
-    version:    "9.2",
+    version:    "9.4",
     marketMood: mood,
     pollCount,
     algos: Object.fromEntries(
@@ -1393,16 +1475,55 @@ app.post("/api/wipe", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// System status — full visibility without Render logs
+app.get("/api/system", async (req, res) => {
+  try {
+    // Quick DB ping
+    const dbPing = await db("SELECT 1 AS ok").then(() => true).catch(() => false);
+    sysStatus.database.ok = dbPing;
+
+    // Open trade counts
+    const openCounts = {};
+    for (const k of ALGO_KEYS) {
+      const r = await db(`SELECT COUNT(*) AS n FROM trades_${k} WHERE status='OPEN'`).catch(() => null);
+      openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
+    }
+
+    res.json({
+      ts:          new Date().toISOString(),
+      version:     "9.4",
+      uptime:      Math.round(process.uptime()),
+      pollCount,
+      marketMood:  mood,
+      apis: {
+        dexscreener: sysStatus.dexscreener,
+        rugcheck:    {
+          ...sysStatus.rugcheck,
+          recentResults: sysStatus.rugLog.slice(0, 10),
+        },
+        database:    sysStatus.database,
+      },
+      funnel:      sysStatus.funnel,
+      openTrades:  openCounts,
+      lastErrors:  sysStatus.lastErrors.slice(0, 10),
+      instructions: "Paste this JSON here: https://claude.ai — I will diagnose instantly",
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Catch-all route
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Wave Rider v9.2 backend running.");
+  res.status(200).send("S0NAR Wave Rider v9.4 backend running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR WAVE RIDER v9.2 | Port:${PORT}`);
+  console.log(`\nS0NAR WAVE RIDER v9.4 | Port:${PORT}`);
   console.log(`DB: ${process.env.DATABASE_URL ? "connected" : "MISSING — check env vars"}`);
   console.log(`Strategies: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name}`);
   console.log(`Poll every ${FETCH_MS}ms | Check positions every ${CHECK_MS}ms\n`);
