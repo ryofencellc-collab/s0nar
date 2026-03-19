@@ -1,4 +1,4 @@
-// S0NAR App.jsx v9.0 — Wave Rider 4-Strategy
+// S0NAR App.jsx v9.1 — Wave Rider 4-Strategy
 import React, { useState, useEffect } from "react";
 
 // ── CONSTANTS ──────────────────────────────────────────────
@@ -113,7 +113,7 @@ function LoginScreen({ onLogin }) {
       justifyContent:"center",fontFamily:"'Courier New',monospace"}}>
       <div style={{width:300,textAlign:"center",padding:"0 20px"}}>
         <div style={{fontSize:26,fontWeight:900,letterSpacing:4,color:G,marginBottom:6}}>◉ S0NAR</div>
-        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>WAVE RIDER v9.0</div>
+        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>WAVE RIDER v9.1</div>
         <div style={{fontSize:8,color:ALGO_COLORS.a,marginBottom:30}}>4-STRATEGY LAB</div>
 
         <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"20px"}}>
@@ -327,7 +327,7 @@ function AppInner({ token, headers, onLogout }) {
           </div>
           <div style={{textAlign:"right",flexShrink:0,paddingLeft:8}}>
             <div style={{fontSize:7,color:DIM}}>WAVE RIDER</div>
-            <div style={{fontSize:10,fontWeight:900,color:G}}>v9.0</div>
+            <div style={{fontSize:10,fontWeight:900,color:G}}>v9.1</div>
             <button onClick={onLogout}
               style={{fontSize:6,color:DIM,background:"transparent",border:"none",cursor:"pointer",letterSpacing:1}}>
               LOCK
@@ -818,7 +818,7 @@ function AppInner({ token, headers, onLogout }) {
           {/* Version info */}
           <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px"}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:6}}>VERSION</div>
-            <div style={{fontSize:9,color:"white"}}>S0NAR Wave Rider v9.0</div>
+            <div style={{fontSize:9,color:"white"}}>S0NAR Wave Rider v9.1</div>
             <div style={{fontSize:8,color:DIM,marginTop:4}}>Poll: 15s · Check: 20s · 38 queries</div>
             <div style={{fontSize:8,color:DIM,marginTop:2}}>Exit: T1 varies · Max hold 25-120m per algo</div>
           </div>
@@ -864,10 +864,10 @@ function AppInner({ token, headers, onLogout }) {
 
       <div style={{padding:"5px",borderTop:`1px solid ${BORDER}`,background:CARD,
         fontSize:6,color:"#0c1820",textAlign:"center"}}>
-        S0NAR v9.0 · WAVE RIDER · PAPER TRADING · NOT FINANCIAL ADVICE
+        S0NAR v9.1 · WAVE RIDER · PAPER TRADING · NOT FINANCIAL ADVICE
       </div>
     </div>
   );
 }
 
-// end of App.jsx v9.0
+// end of App.jsx v9.1
