@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — WAVE RIDER v9.0
+//  S0NAR — WAVE RIDER v9.1
 //  4-Strategy momentum trading: ride the wave, get out with profit.
 //  Strategy: find coins already moving, enter early in the move,
 //  exit before the peak. Not sniping launches. Not holding bags.
@@ -86,7 +86,7 @@ async function initDB() {
     const cnt = await db(`SELECT COUNT(*) FROM trades_${k}`);
     console.log(`  trades_${k}: ${cnt.rows[0].count} rows`);
   }
-  console.log("DB ready — v9.0 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
+  console.log("DB ready — v9.1 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -134,13 +134,13 @@ if (hasDist) {
 const ALGOS = {
   a: {
     name: "WAVE",
-    desc: "Coins 15-90min with building momentum. FOMO 30-72, price +5-50%. Ride the wave before retail floods in.",
+    desc: "Coins 10-120min with any momentum. Broad entry — get in early, exit with profit.",
     color: "#00e5ff",
-    minScore: 45, maxScore: 99,  // was 55 — too strict, missing real setups
-    minFomo: 30,  maxFomo: 72,   // was 40-70 — widened to catch more momentum
-    minLiq: 10000, minVol5m: 300, minBuyPct: 52, // was 20k/600/55 — too high for normal market
-    minAge: 10,   maxAge: 120,   // was 15-90 — widened both ends
-    minPc5m: 5,   maxPc5m: 60,  // was 8-45 — lowered entry, raised ceiling
+    minScore: 38, maxScore: 99,  // was 45 — tokens hitting 40 need to pass
+    minFomo: 10,  maxFomo: 80,   // was 20 — dropping to 10, fomo sits low in quiet market
+    minLiq: 5000, minVol5m: 200, minBuyPct: 50, // was 8000 — dropping liq min
+    minAge: 5,    maxAge: 180,   // was 10-120
+    minPc5m: -5,  maxPc5m: 80,  // market flat/slightly down, allow negative
     minZScore: 0,
     baseBet: 50,
     stopLoss: 0.84,
@@ -153,14 +153,14 @@ const ALGOS = {
   },
   b: {
     name: "SURGE",
-    desc: "Abnormal volume spike on any age coin. z-score>1.5, something is happening — get in.",
+    desc: "Volume or price activity on any age coin. Catches anything moving.",
     color: "#ff6d00",
-    minScore: 45, maxScore: 99,
-    minFomo: 20,  maxFomo: 82,   // widened — normal market fomo sits lower
-    minLiq: 8000, minVol5m: 300, minBuyPct: 50, // vol was 500 — too high, lowered to 300
+    minScore: 38, maxScore: 99,  // was 45
+    minFomo: 15,  maxFomo: 85,   // was 20-82
+    minLiq: 5000, minVol5m: 150, minBuyPct: 50, // was 8000/300/50
     minAge: 3,    maxAge: 480,
-    minPc5m: 2,   maxPc5m: 82,  // widened
-    minZScore: 1.5,
+    minPc5m: -5,  maxPc5m: 85,  // allow flat/slight down
+    minZScore: 0,                // was 1.5 — nothing spiking, remove requirement
     baseBet: 40,
     stopLoss: 0.82,
     earlyStop: 0.86, earlyStopMinutes: 5,
@@ -172,13 +172,13 @@ const ALGOS = {
   },
   c: {
     name: "STEADY",
-    desc: "Decent liq + low-mid FOMO + quiet price. Slow build before retail notices.",
+    desc: "Any liq + any fomo + quiet to mild price. Broad steady accumulation pattern.",
     color: "#69f0ae",
-    minScore: 48, maxScore: 85,  // was 58-82 — too narrow
-    minFomo: 10,  maxFomo: 55,   // was 15-48 — widened
-    minLiq: 15000, minVol5m: 150, minBuyPct: 50, // was 35k/300/52 — 35k liq almost never hit
-    minAge: 15,   maxAge: 240,   // was 20-150 — widened
-    minPc5m: -8,  maxPc5m: 25,  // was -5 to 18
+    minScore: 38, maxScore: 88,  // was 48-85
+    minFomo: 0,   maxFomo: 60,   // was 10-55 — fomo 0 tokens need to pass
+    minLiq: 8000, minVol5m: 100, minBuyPct: 48, // was 15k/150/50
+    minAge: 10,   maxAge: 300,   // was 15-240
+    minPc5m: -10, maxPc5m: 30,  // was -8 to 25
     minZScore: 0,
     baseBet: 55,
     stopLoss: 0.74,
@@ -191,13 +191,13 @@ const ALGOS = {
   },
   d: {
     name: "ROCKET",
-    desc: "High FOMO (35-85), price +5-100%. Jump on strong momentum, quick exit.",
+    desc: "Any momentum signal. Catches coins starting to move regardless of speed.",
     color: "#ff1744",
-    minScore: 45, maxScore: 99,
-    minFomo: 35,  maxFomo: 85,   // was 45 — lowered, 45 barely hits in normal market
-    minLiq: 8000, minVol5m: 300, minBuyPct: 52, // was 400/54 — too strict
-    minAge: 3,    maxAge: 120,   // was 90 — widened
-    minPc5m: 5,   maxPc5m: 100, // was 10 — lowered entry threshold
+    minScore: 38, maxScore: 99,  // was 45
+    minFomo: 15,  maxFomo: 88,   // was 25 — dropping, fomo low in quiet market
+    minLiq: 5000, minVol5m: 150, minBuyPct: 50, // was 8000/300/52
+    minAge: 3,    maxAge: 150,   // was 3-120
+    minPc5m: -5,  maxPc5m: 100, // allow flat/slight down
     minZScore: 0,
     baseBet: 35,
     stopLoss: 0.80,
@@ -1192,7 +1192,7 @@ app.get("/health", (req, res) => {
   res.json({
     status:     "ok",
     ts:         new Date().toISOString(),
-    version:    "9.0",
+    version:    "9.1",
     marketMood: mood,
     pollCount,
     algos: Object.fromEntries(
@@ -1390,12 +1390,12 @@ app.post("/api/wipe", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Wave Rider v9.0 backend running.");
+  res.status(200).send("S0NAR Wave Rider v9.1 backend running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR WAVE RIDER v9.0 | Port:${PORT}`);
+  console.log(`\nS0NAR WAVE RIDER v9.1 | Port:${PORT}`);
   console.log(`DB: ${process.env.DATABASE_URL ? "connected" : "MISSING — check env vars"}`);
   console.log(`Strategies: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name}`);
   console.log(`Poll every ${FETCH_MS}ms | Check positions every ${CHECK_MS}ms\n`);
