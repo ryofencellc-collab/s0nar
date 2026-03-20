@@ -29,6 +29,9 @@ app.use(express.json());
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
+  max: 5,                // Hard cap — prevents connection pile-up that killed Render
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
 async function db(sql, params = []) {
@@ -96,17 +99,6 @@ async function initDB() {
     await db(`CREATE INDEX IF NOT EXISTS idx_sig_${k}_seen  ON signals_${k}(seen_at DESC)`);
     // Safe migrations
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS rug_score INTEGER DEFAULT 0`).catch(() => {});
-  }
-  // Clean up old v10 slot tables if they exist
-  const oldSlots = ["a1","a2","a3","a4","a5","a6","a7","a8","a9","a10",
-    "b1","b2","b3","b4","b5","b6","b7","b8","b9","b10",
-    "c1","c2","c3","c4","c5","c6","c7","c8","c9","c10",
-    "d1","d2","d3","d4","d5","d6","d7","d8","d9","d10",
-    "e1","e2","e3","e4","e5","e6","e7","e8","e9","e10",
-    "wave","surge","steady","rocket","e"];
-  for (const s of oldSlots) {
-    await pool.query(`DROP TABLE IF EXISTS trades_${s}`).catch(() => {});
-    await pool.query(`DROP TABLE IF EXISTS signals_${s}`).catch(() => {});
   }
   console.log("DB ready — v11.0 (4 algo tables)");
 }
@@ -189,11 +181,11 @@ const ALGOS = {
     minAge: 10,   maxAge: 300,
     minPc5m: -10, maxPc5m: 30,
     baseBet: 55,
-    stopLoss: 0.74, earlyStop: 0.82, earlyStopMinutes: 10,
-    trailingPct: 0.82, trailingActivateMin: 30,
-    tier1: 1.50, tier1Sell: 0.40,
-    tier2: 3.00, tier2Sell: 0.35,
-    tier3: 6.00, maxHold: 120,
+    stopLoss: 0.82, earlyStop: 0.87, earlyStopMinutes: 10,
+    trailingPct: 0.84, trailingActivateMin: 30,
+    tier1: 1.30, tier1Sell: 0.40,
+    tier2: 2.20, tier2Sell: 0.35,
+    tier3: 4.50, maxHold: 120,
   },
   d: {
     name: "ROCKET",
@@ -479,7 +471,8 @@ function calcRawFomo(p) {
   if (pc5 >  5 && pc5 <= 15) fomo += 20;
   if (pc5 > 15 && pc5 <= 30) fomo += 12;
   if (pc5 > 30 && pc5 <= 60) fomo +=  5;
-  if (pc5 > 60)               fomo -= 10;
+  if (pc5 > 60 && pc5 <= 100) fomo += 3;
+  if (pc5 > 100)               fomo += 1;
   if (pc5 <  0)               fomo -=  5;
 
   const total = b + s;
@@ -619,6 +612,7 @@ function calcPnL(trade, curPrice) {
   const bet    = parseFloat(trade.bet_size);
   const ageMin = (Date.now() - new Date(trade.opened_at).getTime()) / 60000;
   const hi     = Math.max(parseFloat(trade.highest_mult || 1), mult);
+  const s1     = cfg.tier1Sell, s2 = cfg.tier2Sell, s3 = 1 - s1 - s2;
 
   if (mult <= cfg.earlyStop && ageMin < cfg.earlyStopMinutes) {
     return { status: "CLOSED", exit: "EARLY_STOP", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
@@ -626,18 +620,17 @@ function calcPnL(trade, curPrice) {
   if (mult <= cfg.stopLoss) {
     return { status: "CLOSED", exit: "STOP_LOSS", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
   }
-  if (ageMin >= cfg.trailingActivateMin && hi > 1.2 && mult <= hi * cfg.trailingPct) {
-    return { status: "CLOSED", exit: "TRAILING_STOP", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
-  }
   if (mult >= cfg.tier3) {
-    const s1 = cfg.tier1Sell, s2 = cfg.tier2Sell, s3 = 1 - s1 - s2;
     const pnl = (bet * s1 * (cfg.tier1 - 1)) + (bet * s2 * (cfg.tier2 - 1)) + (bet * s3 * (mult - 1));
     return { status: "CLOSED", exit: "TIER3", mult, pnl: +pnl.toFixed(2), highMult: hi };
   }
   if (mult >= cfg.tier2) {
-    const s1 = cfg.tier1Sell, s2 = cfg.tier2Sell, s3 = 1 - s1 - s2;
     const pnl = (bet * s1 * (cfg.tier1 - 1)) + (bet * s2 * (mult - 1)) + (bet * s3 * (mult - 1));
     return { status: "CLOSED", exit: "TIER2", mult, pnl: +pnl.toFixed(2), highMult: hi };
+  }
+  // Trailing only fires BELOW tier1 — once past tier1 let the tier targets do the work
+  if (ageMin >= cfg.trailingActivateMin && hi > 1.2 && mult < cfg.tier1 && mult <= hi * cfg.trailingPct) {
+    return { status: "CLOSED", exit: "TRAILING_STOP", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
   }
   if (mult >= cfg.tier1 && ageMin >= 5) {
     return { status: "OPEN", exit: null, mult, pnl: null, highMult: hi };
@@ -676,19 +669,14 @@ async function hadTrade(algoKey, pairAddr, ticker, name) {
   );
   if (byAddr.rows.length) return true;
 
+  // 30 min cooldown per ticker (was 90 — re-pumps now catchable after 30min)
   const byTicker = await db(
-    `SELECT id FROM trades_${algoKey} WHERE LOWER(ticker)=LOWER($1) AND opened_at>NOW()-INTERVAL '90 minutes' LIMIT 1`,
+    `SELECT id FROM trades_${algoKey} WHERE LOWER(ticker)=LOWER($1) AND opened_at>NOW()-INTERVAL '30 minutes' LIMIT 1`,
     [ticker]
   );
   if (byTicker.rows.length) return true;
 
-  if (name && name.length > 3) {
-    const byName = await db(
-      `SELECT id FROM trades_${algoKey} WHERE LOWER(name)=LOWER($1) AND opened_at>NOW()-INTERVAL '90 minutes' LIMIT 1`,
-      [name]
-    );
-    if (byName.rows.length) return true;
-  }
+  // Name match removed — too broad, blocked unrelated tokens sharing common words
   return false;
 }
 
@@ -859,19 +847,19 @@ async function processAll(searchPairs, boostedPairs) {
       sysStatus.funnel[algoKey].seen++;
 
       if (!gate.pass || !rug.pass) {
-        logSig(algoKey, p, sc, fomo, false, !gate.pass ? gate.failed.join("; ") : rug.warnings.join("; "));
+        await logSig(algoKey, p, sc, fomo, false, !gate.pass ? gate.failed.join("; ") : rug.warnings.join("; "));
         continue;
       }
 
       sysStatus.funnel[algoKey].gate++;
 
       const already = await hadTrade(algoKey, p.pairAddress, p.baseToken?.symbol || "???", p.baseToken?.name || "");
-      if (already) { logSig(algoKey, p, sc, fomo, false, "already_traded"); continue; }
+      if (already) { await logSig(algoKey, p, sc, fomo, false, "already_traded"); continue; }
 
       const tokenKey = p.baseToken?.address || p.pairAddress;
       const existing = crossAlgoExposure.get(tokenKey);
       if (existing && existing.size >= 2 && !existing.has(algoKey)) {
-        logSig(algoKey, p, sc, fomo, false, "cross_algo_limit");
+        await logSig(algoKey, p, sc, fomo, false, "cross_algo_limit");
         continue;
       }
 
@@ -880,7 +868,7 @@ async function processAll(searchPairs, boostedPairs) {
         : { score: 0, flags: [], pass: true, apiStatus: "no_mint" };
 
       if (!rugResult.pass) {
-        logSig(algoKey, p, sc, fomo, false, `rug:[${rugResult.flags.join(",")}]`);
+        await logSig(algoKey, p, sc, fomo, false, `rug:[${rugResult.flags.join(",")}]`);
         continue;
       }
 
@@ -894,7 +882,7 @@ async function processAll(searchPairs, boostedPairs) {
       });
 
       if (trade) {
-        logSig(algoKey, p, sc, fomo, true, null);
+        await logSig(algoKey, p, sc, fomo, true, null);
         sysStatus.funnel[algoKey].entered++;
         entries[algoKey]++;
         const age = p.pairCreatedAt ? ((Date.now() - p.pairCreatedAt) / 60000).toFixed(0) : "?";
@@ -999,12 +987,12 @@ async function checkPositions() {
 async function updateMood() {
   if (dexIsBlocked()) return;
   try {
-    const [r1, r2] = await Promise.allSettled([dexSearch("solana meme"), dexSearch("pump.fun")]);
-    await delay(500);
-    const pairs = [
-      ...(r1.status === "fulfilled" ? r1.value : []),
-      ...(r2.status === "fulfilled" ? r2.value : []),
-    ].slice(0, 40);
+    // Sequential — not concurrent. Concurrent calls burn 429 budget.
+    const r1 = await dexSearch("solana meme");
+    if (dexIsBlocked()) return;
+    await delay(1000);
+    const r2 = await dexSearch("pump.fun");
+    const pairs = [...r1, ...r2].slice(0, 40);
     if (!pairs.length) return;
     const avg = pairs.reduce((a, p) => a + parseFloat(p.priceChange?.m5 || 0), 0) / pairs.length;
     const hot = pairs.filter(p => parseFloat(p.priceChange?.m5 || 0) > 8).length;
@@ -1021,14 +1009,17 @@ async function updateMood() {
 
 async function refreshDaily() {
   try {
-    const now    = new Date();
-    const nyDate = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
-    nyDate.setHours(0, 0, 0, 0);
-    const startOfDay = new Date(now.getTime() - (now - nyDate));
+    // Get start of current day in EST cleanly — no broken date arithmetic
+    const nowEST     = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const startOfDay = new Date(nowEST);
+    startOfDay.setHours(0, 0, 0, 0);
+    // Convert back to UTC for the DB query
+    const offsetMs   = new Date().getTime() - nowEST.getTime();
+    const startUTC   = new Date(startOfDay.getTime() + offsetMs);
     for (const k of ALGO_KEYS) {
       const r = await db(
         `SELECT COALESCE(SUM(pnl), 0) AS t FROM trades_${k} WHERE status='CLOSED' AND closed_at >= $1`,
-        [startOfDay.toISOString()]
+        [startUTC.toISOString()]
       );
       algoState[k].dailyPnl = parseFloat(r.rows[0].t);
     }
@@ -1121,24 +1112,39 @@ app.get("/api/open-pnl", async (req, res) => {
     for (const k of ALGO_KEYS) {
       const open = await getOpen(k);
       if (!open.length) { result[k] = []; continue; }
-      const addrs = open.map(t => t.pair_address);
-      const pairs = await dexPairs(addrs).catch(() => []);
-      const pm    = new Map(pairs.map(p => [p.pairAddress, p]));
+      // Use pairCache — checkPositions already keeps this fresh every 25s.
+      // Do NOT call dexPairs() here — that fires DexScreener on every dashboard refresh (every 8s).
       result[k] = open.map(t => {
-        const pair     = pm.get(t.pair_address);
+        const pair     = pairCache.get(t.pair_address);
         const curPrice = pair ? parseFloat(pair.priceUsd) : null;
         const entry    = parseFloat(t.entry_price);
         const bet      = parseFloat(t.bet_size);
         const ageMin   = (Date.now() - new Date(t.opened_at).getTime()) / 60000;
         const hi       = parseFloat(t.highest_mult || 1);
-        if (!curPrice || !entry) return { id: t.id, ticker: t.ticker, pair_address: t.pair_address, dex_url: t.dex_url, score: t.score, fomo_score: t.fomo_score || 0, bet_size: bet, entry_price: entry, opened_at: t.opened_at, cur_price: null, pct_change: null, unrealized_pnl: null, highest_mult: hi, age_min: +ageMin.toFixed(1), warning: "no_price", algo: k };
+        if (!curPrice || !entry) return {
+          id: t.id, ticker: t.ticker, pair_address: t.pair_address, dex_url: t.dex_url,
+          score: t.score, fomo_score: t.fomo_score || 0, bet_size: bet, entry_price: entry,
+          opened_at: t.opened_at, cur_price: null, pct_change: null, unrealized_pnl: null,
+          highest_mult: hi, age_min: +ageMin.toFixed(1), warning: "no_price", algo: k,
+        };
         const mult  = curPrice / entry;
         const pct   = (mult - 1) * 100;
         const upnl  = +(bet * (mult - 1)).toFixed(2);
         const newHi = Math.max(hi, mult);
         const cfg   = ALGOS[k];
-        const warning = mult <= cfg.stopLoss + 0.05 ? "near_stop" : mult <= cfg.earlyStop + 0.03 && ageMin < cfg.earlyStopMinutes ? "near_early_stop" : newHi > 1.2 && mult <= newHi * cfg.trailingPct + 0.05 && ageMin >= cfg.trailingActivateMin ? "near_trailing" : mult >= cfg.tier2 - 0.1 ? "near_tier2" : mult >= cfg.tier1 - 0.05 ? "near_tier1" : "ok";
-        return { id: t.id, ticker: t.ticker, pair_address: t.pair_address, dex_url: t.dex_url, score: t.score, fomo_score: t.fomo_score || 0, bet_size: bet, entry_price: entry, opened_at: t.opened_at, cur_price: +curPrice.toFixed(10), pct_change: +pct.toFixed(2), unrealized_pnl: upnl, mult: +mult.toFixed(4), highest_mult: +newHi.toFixed(4), age_min: +ageMin.toFixed(1), warning, algo: k };
+        const warning =
+          mult <= cfg.stopLoss + 0.05 ? "near_stop" :
+          mult <= cfg.earlyStop + 0.03 && ageMin < cfg.earlyStopMinutes ? "near_early_stop" :
+          newHi > 1.2 && mult <= newHi * cfg.trailingPct + 0.05 && ageMin >= cfg.trailingActivateMin ? "near_trailing" :
+          mult >= cfg.tier2 - 0.1 ? "near_tier2" :
+          mult >= cfg.tier1 - 0.05 ? "near_tier1" : "ok";
+        return {
+          id: t.id, ticker: t.ticker, pair_address: t.pair_address, dex_url: t.dex_url,
+          score: t.score, fomo_score: t.fomo_score || 0, bet_size: bet, entry_price: entry,
+          opened_at: t.opened_at, cur_price: +curPrice.toFixed(10), pct_change: +pct.toFixed(2),
+          unrealized_pnl: upnl, mult: +mult.toFixed(4), highest_mult: +newHi.toFixed(4),
+          age_min: +ageMin.toFixed(1), warning, algo: k,
+        };
       });
     }
     res.json(result);
