@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — WAVE RIDER v9.5
+//  S0NAR — WAVE RIDER v9.6
 //  4-Strategy momentum trading: ride the wave, get out with profit.
 //  Strategy: find coins already moving, enter early in the move,
 //  exit before the peak. Not sniping launches. Not holding bags.
@@ -102,7 +102,7 @@ async function initDB() {
     const cnt = await db(`SELECT COUNT(*) FROM trades_${k}`);
     console.log(`  trades_${k}: ${cnt.rows[0].count} rows`);
   }
-  console.log("DB ready — v9.5 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
+  console.log("DB ready — v9.6 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -152,9 +152,9 @@ const ALGOS = {
     name: "WAVE",
     desc: "Coins 10-120min with any momentum. Broad entry — get in early, exit with profit.",
     color: "#00e5ff",
-    minScore: 38, maxScore: 99,  // was 45 — tokens hitting 40 need to pass
-    minFomo: 10,  maxFomo: 80,   // was 20 — dropping to 10, fomo sits low in quiet market
-    minLiq: 5000, minVol5m: 200, minBuyPct: 50, // was 8000 — dropping liq min
+    minScore: 38, maxScore: 99,
+    minFomo: 5,   maxFomo: 80,   // lowered from 10 — catches fomo=8 tokens
+    minLiq: 5000, minVol5m: 150, minBuyPct: 50, // lowered vol from 200 — catches $196 tokens
     minAge: 5,    maxAge: 180,   // was 10-120
     minPc5m: -5,  maxPc5m: 80,  // market flat/slightly down, allow negative
     minZScore: 0,
@@ -210,7 +210,7 @@ const ALGOS = {
     desc: "Any momentum signal. Catches coins starting to move regardless of speed.",
     color: "#ff1744",
     minScore: 38, maxScore: 99,  // was 45
-    minFomo: 15,  maxFomo: 88,   // was 25 — dropping, fomo low in quiet market
+    minFomo: 8,   maxFomo: 88,   // lowered from 15 — catches fomo=8/14 tokens
     minLiq: 5000, minVol5m: 150, minBuyPct: 50, // was 8000/300/52
     minAge: 3,    maxAge: 150,   // was 3-120
     minPc5m: -5,  maxPc5m: 100, // allow flat/slight down
@@ -1111,7 +1111,7 @@ async function checkPositions() {
                   highMult: parseFloat(trade.highest_mult || 1),
                 });
                 st.dailyPnl += pnl;
-                console.log(`  [${algoKey.toUpperCase()}] DELISTED ${trade.ticker} (3 misses) $${pnl}`);
+                console.log(`  [${algoKey.toUpperCase()}] DELISTED ${trade.ticker} (3 misses) pnl:$${pnl} entryLiq:$${Math.round(parseFloat(trade.liq||0))}`);
               } else {
                 console.log(`  [${algoKey.toUpperCase()}] ${trade.ticker} miss ${misses}/3`);
               }
@@ -1277,7 +1277,7 @@ app.get("/health", (req, res) => {
   res.json({
     status:     "ok",
     ts:         new Date().toISOString(),
-    version:    "9.5",
+    version:    "9.6",
     marketMood: mood,
     pollCount,
     algos: Object.fromEntries(
@@ -1460,11 +1460,11 @@ app.post("/api/wipe", async (req, res) => {
       algoState[k].circuitBroken = false;
       algoState[k].circuitAt     = null;
     }
-    // Also clear any old tables from previous versions
-    const oldKeys = ["e", "wave", "surge"];
+    // Also clear any old tables from previous versions — use pool.query to avoid sysErr noise
+    const oldKeys = ["e", "wave", "surge", "steady", "rocket"];
     for (const ok of oldKeys) {
-      await db(`TRUNCATE trades_${ok} RESTART IDENTITY`).catch(() => {});
-      await db(`TRUNCATE signals_${ok} RESTART IDENTITY`).catch(() => {});
+      await pool.query(`TRUNCATE trades_${ok} RESTART IDENTITY`).catch(() => {});
+      await pool.query(`TRUNCATE signals_${ok} RESTART IDENTITY`).catch(() => {});
     }
     console.log("FULL WIPE complete");
     res.json({ ok: true, message: "All data wiped. Fresh start." });
@@ -1514,12 +1514,12 @@ app.get("/api/system", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Wave Rider v9.5 backend running.");
+  res.status(200).send("S0NAR Wave Rider v9.6 backend running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR WAVE RIDER v9.5 | Port:${PORT}`);
+  console.log(`\nS0NAR WAVE RIDER v9.6 | Port:${PORT}`);
   console.log(`DB: ${process.env.DATABASE_URL ? "connected" : "MISSING — check env vars"}`);
   console.log(`Strategies: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name}`);
   console.log(`Poll every ${FETCH_MS}ms | Check positions every ${CHECK_MS}ms\n`);
