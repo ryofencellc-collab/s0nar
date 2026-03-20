@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — WAVE RIDER v9.4
+//  S0NAR — WAVE RIDER v9.5
 //  4-Strategy momentum trading: ride the wave, get out with profit.
 //  Strategy: find coins already moving, enter early in the move,
 //  exit before the peak. Not sniping launches. Not holding bags.
@@ -96,13 +96,13 @@ async function initDB() {
     await db(`CREATE INDEX IF NOT EXISTS idx_tr_${k}_opened ON trades_${k}(opened_at DESC)`);
     await db(`CREATE INDEX IF NOT EXISTS idx_sig_${k}_seen  ON signals_${k}(seen_at DESC)`);
     // Safe column migration for existing tables
-    await db(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS rug_score INTEGER DEFAULT 0`).catch(() => {});
-    await db(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS stealth_score INTEGER DEFAULT 0`).catch(() => {});
-    await db(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS is_stealth BOOLEAN DEFAULT FALSE`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS rug_score INTEGER DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS stealth_score INTEGER DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS is_stealth BOOLEAN DEFAULT FALSE`).catch(() => {});
     const cnt = await db(`SELECT COUNT(*) FROM trades_${k}`);
     console.log(`  trades_${k}: ${cnt.rows[0].count} rows`);
   }
-  console.log("DB ready — v9.4 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
+  console.log("DB ready — v9.5 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -947,20 +947,16 @@ async function pollSignals() {
     const q2 = QUERIES[(qi + 2) % QUERIES.length];
     qi += 3;
 
-    const [r1, r2, r3, r4] = await Promise.allSettled([
-      dexSearch(q0),
-      dexSearch(q1),
-      dexSearch(q2),
-      dexBoosted(),
-    ]);
+    const delay = ms => new Promise(r => setTimeout(r, ms));
+    const r1 = await dexSearch(q0).catch(() => []);
+    await delay(400);
+    const r2 = await dexSearch(q1).catch(() => []);
+    await delay(400);
+    const r3 = await dexSearch(q2).catch(() => []);
+    await delay(400);
+    const boostedTokens = await dexBoosted().catch(() => []);
 
-    const searchPairs = [
-      ...(r1.status === "fulfilled" ? r1.value : []),
-      ...(r2.status === "fulfilled" ? r2.value : []),
-      ...(r3.status === "fulfilled" ? r3.value : []),
-    ];
-
-    const boostedTokens = r4.status === "fulfilled" ? r4.value : [];
+    const searchPairs = [...r1, ...r2, ...r3];
     let boostedPairs = [];
     if (boostedTokens.length) {
       const addrs = boostedTokens.map(t => t.tokenAddress).filter(Boolean);
@@ -1281,7 +1277,7 @@ app.get("/health", (req, res) => {
   res.json({
     status:     "ok",
     ts:         new Date().toISOString(),
-    version:    "9.4",
+    version:    "9.5",
     marketMood: mood,
     pollCount,
     algos: Object.fromEntries(
@@ -1492,7 +1488,7 @@ app.get("/api/system", async (req, res) => {
 
     res.json({
       ts:          new Date().toISOString(),
-      version:     "9.4",
+      version:     "9.5",
       uptime:      Math.round(process.uptime()),
       pollCount,
       marketMood:  mood,
@@ -1518,12 +1514,12 @@ app.get("/api/system", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Wave Rider v9.4 backend running.");
+  res.status(200).send("S0NAR Wave Rider v9.5 backend running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR WAVE RIDER v9.4 | Port:${PORT}`);
+  console.log(`\nS0NAR WAVE RIDER v9.5 | Port:${PORT}`);
   console.log(`DB: ${process.env.DATABASE_URL ? "connected" : "MISSING — check env vars"}`);
   console.log(`Strategies: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name}`);
   console.log(`Poll every ${FETCH_MS}ms | Check positions every ${CHECK_MS}ms\n`);
