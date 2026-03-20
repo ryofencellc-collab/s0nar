@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — WAVE RIDER v9.7
+//  S0NAR — WAVE RIDER v9.8
 //  4-Strategy momentum trading: ride the wave, get out with profit.
 //  Strategy: find coins already moving, enter early in the move,
 //  exit before the peak. Not sniping launches. Not holding bags.
@@ -102,7 +102,7 @@ async function initDB() {
     const cnt = await db(`SELECT COUNT(*) FROM trades_${k}`);
     console.log(`  trades_${k}: ${cnt.rows[0].count} rows`);
   }
-  console.log("DB ready — v9.7 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
+  console.log("DB ready — v9.8 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -748,10 +748,11 @@ function checkCircuit(algoKey) {
 // ── MARKET MOOD ────────────────────────────────────────────
 async function updateMood() {
   try {
-    const [r1, r2] = await Promise.allSettled([
-      dexSearch("solana meme"),
-      dexSearch("pump.fun"),
-    ]);
+    // Stagger mood checks to avoid 429
+    const delay = ms => new Promise(r => setTimeout(r, ms));
+    const r1 = await dexSearch("solana meme").then(v=>({status:"fulfilled",value:v})).catch(e=>({status:"rejected",reason:e}));
+    await delay(600);
+    const r2 = await dexSearch("pump.fun").then(v=>({status:"fulfilled",value:v})).catch(e=>({status:"rejected",reason:e}));
     const pairs = [
       ...(r1.status === "fulfilled" ? r1.value : []),
       ...(r2.status === "fulfilled" ? r2.value : []),
@@ -949,11 +950,11 @@ async function pollSignals() {
 
     const delay = ms => new Promise(r => setTimeout(r, ms));
     const r1 = await dexSearch(q0).catch(() => []);
-    await delay(400);
+    await delay(800);
     const r2 = await dexSearch(q1).catch(() => []);
-    await delay(400);
+    await delay(800);
     const r3 = await dexSearch(q2).catch(() => []);
-    await delay(400);
+    await delay(800);
     const boostedTokens = await dexBoosted().catch(() => []);
 
     const searchPairs = [...r1, ...r2, ...r3];
@@ -1277,7 +1278,7 @@ app.get("/health", (req, res) => {
   res.json({
     status:     "ok",
     ts:         new Date().toISOString(),
-    version:    "9.7",
+    version:    "9.8",
     marketMood: mood,
     pollCount,
     algos: Object.fromEntries(
@@ -1478,7 +1479,7 @@ app.get("/api/report", async (req, res) => {
   try {
     // 1. Health
     const health = {
-      version:    "9.7",
+      version:    "9.8",
       ts:         new Date().toISOString(),
       uptime:     Math.round(process.uptime()),
       pollCount,
@@ -1602,12 +1603,12 @@ app.get("/api/system", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Wave Rider v9.7 backend running.");
+  res.status(200).send("S0NAR Wave Rider v9.8 backend running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR WAVE RIDER v9.7 | Port:${PORT}`);
+  console.log(`\nS0NAR WAVE RIDER v9.8 | Port:${PORT}`);
   console.log(`DB: ${process.env.DATABASE_URL ? "connected" : "MISSING — check env vars"}`);
   console.log(`Strategies: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name}`);
   console.log(`Poll every ${FETCH_MS}ms | Check positions every ${CHECK_MS}ms\n`);
@@ -1616,7 +1617,7 @@ app.listen(PORT, async () => {
   await refreshDaily();
   await updateMood();
 
-  setTimeout(pollSignals, 2000);            // First poll after 2s startup delay
+  setTimeout(pollSignals, 8000);            // First poll after 8s startup delay (prevents 429 on cold start)
 
   setInterval(pollSignals,    FETCH_MS);    // 15s
   setInterval(checkPositions, CHECK_MS);    // 20s
