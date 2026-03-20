@@ -1,4 +1,4 @@
-// S0NAR App.jsx v9.6 — Wave Rider 4-Strategy
+// S0NAR App.jsx v9.7 — Wave Rider 4-Strategy
 import React, { useState, useEffect } from "react";
 
 // ── CONSTANTS ──────────────────────────────────────────────
@@ -113,7 +113,7 @@ function LoginScreen({ onLogin }) {
       justifyContent:"center",fontFamily:"'Courier New',monospace"}}>
       <div style={{width:300,textAlign:"center",padding:"0 20px"}}>
         <div style={{fontSize:26,fontWeight:900,letterSpacing:4,color:G,marginBottom:6}}>◉ S0NAR</div>
-        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>WAVE RIDER v9.6</div>
+        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>WAVE RIDER v9.7</div>
         <div style={{fontSize:8,color:ALGO_COLORS.a,marginBottom:30}}>4-STRATEGY LAB</div>
 
         <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"20px"}}>
@@ -245,6 +245,17 @@ function AppInner({ token, headers, onLogout }) {
     } catch(e) { setSysData({ error: e.message }); }
   }
 
+  async function fetchReport() {
+    try {
+      const d = await fetch(`${API}/api/report`, { headers }).then(r=>r.json());
+      const text = JSON.stringify(d, null, 2);
+      await navigator.clipboard.writeText(text);
+      alert("✅ Report copied! Paste to Claude.");
+    } catch(e) {
+      alert("❌ Copy failed — try the textarea below instead");
+    }
+  }
+
   async function doWipe() {
     try {
       const r = await fetch(`${API}/api/wipe`, {
@@ -335,7 +346,7 @@ function AppInner({ token, headers, onLogout }) {
           </div>
           <div style={{textAlign:"right",flexShrink:0,paddingLeft:8}}>
             <div style={{fontSize:7,color:DIM}}>WAVE RIDER</div>
-            <div style={{fontSize:10,fontWeight:900,color:G}}>v9.6</div>
+            <div style={{fontSize:10,fontWeight:900,color:G}}>v9.7</div>
             <button onClick={onLogout}
               style={{fontSize:6,color:DIM,background:"transparent",border:"none",cursor:"pointer",letterSpacing:1}}>
               LOCK
@@ -826,7 +837,7 @@ function AppInner({ token, headers, onLogout }) {
           {/* Version info */}
           <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px"}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:6}}>VERSION</div>
-            <div style={{fontSize:9,color:"white"}}>S0NAR Wave Rider v9.6</div>
+            <div style={{fontSize:9,color:"white"}}>S0NAR Wave Rider v9.7</div>
             <div style={{fontSize:8,color:DIM,marginTop:4}}>Poll: 15s · Check: 20s · 38 queries</div>
             <div style={{fontSize:8,color:DIM,marginTop:2}}>Exit: T1 varies · Max hold 25-120m per algo</div>
           </div>
@@ -841,8 +852,14 @@ function AppInner({ token, headers, onLogout }) {
         <div style={{flex:1,padding:"10px 12px",overflowY:"auto"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2}}>SYSTEM STATUS</div>
-            <button className="btn" onClick={fetchSystem}
-              style={{fontSize:8,color:B,background:"transparent",border:`1px solid ${B}44`,padding:"3px 8px",borderRadius:4}}>↻ REFRESH</button>
+            <div style={{display:"flex",gap:6}}>
+              <button className="btn" onClick={fetchReport}
+                style={{fontSize:8,color:G,background:`${G}18`,border:`1px solid ${G}44`,padding:"3px 10px",borderRadius:4,fontWeight:700}}>
+                📋 COPY REPORT
+              </button>
+              <button className="btn" onClick={fetchSystem}
+                style={{fontSize:8,color:B,background:"transparent",border:`1px solid ${B}44`,padding:"3px 8px",borderRadius:4}}>↻ REFRESH</button>
+            </div>
           </div>
 
           {!sysData && (
@@ -1015,10 +1032,10 @@ function AppInner({ token, headers, onLogout }) {
 
       <div style={{padding:"5px",borderTop:`1px solid ${BORDER}`,background:CARD,
         fontSize:6,color:"#0c1820",textAlign:"center"}}>
-        S0NAR v9.6 · WAVE RIDER · PAPER TRADING · NOT FINANCIAL ADVICE
+        S0NAR v9.7 · WAVE RIDER · PAPER TRADING · NOT FINANCIAL ADVICE
       </div>
     </div>
   );
 }
 
-// end of App.jsx v9.6
+// end of App.jsx v9.7
