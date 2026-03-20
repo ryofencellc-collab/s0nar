@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — WAVE RIDER v9.6
+//  S0NAR — WAVE RIDER v9.7
 //  4-Strategy momentum trading: ride the wave, get out with profit.
 //  Strategy: find coins already moving, enter early in the move,
 //  exit before the peak. Not sniping launches. Not holding bags.
@@ -102,7 +102,7 @@ async function initDB() {
     const cnt = await db(`SELECT COUNT(*) FROM trades_${k}`);
     console.log(`  trades_${k}: ${cnt.rows[0].count} rows`);
   }
-  console.log("DB ready — v9.6 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
+  console.log("DB ready — v9.7 Wave Rider (A=WAVE B=SURGE C=STEADY D=ROCKET)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -1277,7 +1277,7 @@ app.get("/health", (req, res) => {
   res.json({
     status:     "ok",
     ts:         new Date().toISOString(),
-    version:    "9.6",
+    version:    "9.7",
     marketMood: mood,
     pollCount,
     algos: Object.fromEntries(
@@ -1472,6 +1472,94 @@ app.post("/api/wipe", async (req, res) => {
 });
 
 
+
+// ── SINGLE REPORT ENDPOINT — everything in one call ───────
+app.get("/api/report", async (req, res) => {
+  try {
+    // 1. Health
+    const health = {
+      version:    "9.7",
+      ts:         new Date().toISOString(),
+      uptime:     Math.round(process.uptime()),
+      pollCount,
+      marketMood: mood,
+    };
+
+    // 2. Stats for all 4 algos
+    const stats = await Promise.all(ALGO_KEYS.map(k => getAlgoStats(k)));
+
+    // 3. Open PnL
+    const openPnl = {};
+    for (const k of ALGO_KEYS) {
+      const open = await getOpen(k);
+      if (!open.length) { openPnl[k] = []; continue; }
+      const pairs = await dexPairs(open.map(t => t.pair_address)).catch(() => []);
+      const pm = new Map(pairs.map(p => [p.pairAddress, p]));
+      openPnl[k] = open.map(t => {
+        const pair = pm.get(t.pair_address);
+        const cur  = pair ? parseFloat(pair.priceUsd) : null;
+        const entry = parseFloat(t.entry_price);
+        const bet   = parseFloat(t.bet_size);
+        if (!cur || !entry) return { ticker: t.ticker, pct: null, upnl: null };
+        const pct  = ((cur/entry)-1)*100;
+        const upnl = +(bet*(cur/entry-1)).toFixed(2);
+        return { ticker: t.ticker, pct: +pct.toFixed(2), upnl, mult: +(cur/entry).toFixed(4) };
+      });
+    }
+
+    // 4. Debug — top skip reasons per algo (last hour)
+    const debug = {};
+    for (const k of ALGO_KEYS) {
+      const rows = (await db(
+        `SELECT entered, skip_reason FROM signals_${k}
+         WHERE seen_at > NOW() - INTERVAL '1 hour'`
+      )).rows;
+      const tally = {};
+      rows.filter(s => s.skip_reason).forEach(s => {
+        s.skip_reason.split("; ").forEach(r => {
+          const key = r.split("_").slice(0,3).join("_");
+          tally[key] = (tally[key]||0)+1;
+        });
+      });
+      debug[k] = {
+        name:    ALGOS[k].name,
+        total:   rows.length,
+        entered: rows.filter(s => s.entered).length,
+        top3:    Object.entries(tally).sort((a,b)=>b[1]-a[1]).slice(0,3),
+      };
+    }
+
+    // 5. System status
+    const dbPing = await db("SELECT 1").then(()=>true).catch(()=>false);
+    const openCounts = {};
+    for (const k of ALGO_KEYS) {
+      const r = await db(`SELECT COUNT(*) AS n FROM trades_${k} WHERE status='OPEN'`).catch(()=>null);
+      openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
+    }
+
+    res.json({
+      health,
+      stats: stats.map(s => ({
+        algo: s.algo, name: s.name,
+        bankroll: s.bankroll, totalPnl: s.totalPnl,
+        winRate: s.winRate, totalTrades: s.totalTrades,
+        openTrades: s.openTrades, exits: s.exits,
+      })),
+      openPnl,
+      debug,
+      system: {
+        database:    { ok: dbPing, ...sysStatus.database },
+        dexscreener: sysStatus.dexscreener,
+        rugcheck:    { ...sysStatus.rugcheck, recentResults: sysStatus.rugLog.slice(0,5) },
+        funnel:      sysStatus.funnel,
+        openTrades:  openCounts,
+        lastErrors:  sysStatus.lastErrors.slice(0,5),
+      },
+      instructions: "Paste this to Claude for instant diagnosis",
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // System status — full visibility without Render logs
 app.get("/api/system", async (req, res) => {
   try {
@@ -1514,12 +1602,12 @@ app.get("/api/system", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Wave Rider v9.6 backend running.");
+  res.status(200).send("S0NAR Wave Rider v9.7 backend running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR WAVE RIDER v9.6 | Port:${PORT}`);
+  console.log(`\nS0NAR WAVE RIDER v9.7 | Port:${PORT}`);
   console.log(`DB: ${process.env.DATABASE_URL ? "connected" : "MISSING — check env vars"}`);
   console.log(`Strategies: A=${ALGOS.a.name} B=${ALGOS.b.name} C=${ALGOS.c.name} D=${ALGOS.d.name}`);
   console.log(`Poll every ${FETCH_MS}ms | Check positions every ${CHECK_MS}ms\n`);
