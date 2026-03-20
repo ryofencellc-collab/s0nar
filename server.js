@@ -828,6 +828,36 @@ async function processToken(p, sourceKey) {
 let ppWs = null;
 let ppReconnectTimer = null;
 
+// Queue: mint addresses received from PumpPortal waiting for DexScreener to index them
+// Key: mintAddress, Value: { receivedAt, symbol, name, retries }
+const ppMintQueue = new Map();
+
+// Process queued mints — runs every 30s, retries up to 4 times (2 minutes total)
+async function drainPpQueue() {
+  if (!ppMintQueue.size) return;
+  const now = Date.now();
+  for (const [mint, meta] of ppMintQueue) {
+    const ageMs = now - meta.receivedAt;
+    // Only try after 30s (DexScreener needs time to index)
+    if (ageMs < 30000) continue;
+    // Give up after 3 minutes
+    if (ageMs > 180000 || meta.retries >= 4) { ppMintQueue.delete(mint); continue; }
+    try {
+      const pairs = await dexPairs([mint]).catch(()=>[]);
+      if (pairs.length > 0) {
+        console.log(`[SRC-A] Queued token found: ${pairs[0].baseToken?.symbol} (${meta.retries+1} tries)`);
+        ppMintQueue.delete(mint);
+        await processToken(pairs[0], "a");
+      } else {
+        meta.retries++;
+        console.log(`[SRC-A] ${meta.symbol} still not indexed (try ${meta.retries}/4)`);
+      }
+    } catch(e) { meta.retries++; }
+    await delay(500); // Stagger calls
+  }
+}
+setInterval(drainPpQueue, 30000);
+
 function connectPumpPortal() {
   if (ppWs) { try { ppWs.terminate(); } catch(e){} }
 
@@ -858,31 +888,24 @@ function connectPumpPortal() {
 
       if (!msg.mint) return; // Not a token event
 
-      // Build a normalized token object from PumpPortal data
-      const ageMin = msg.timestamp
-        ? (Date.now()-msg.timestamp*1000)/60000
-        : 0;
+      sysStatus.sources.a.tokensReceived++;
 
-      // Fetch full pair data from DexScreener for scoring
-      // Only one call per new token — not polling
+      // Try DexScreener immediately — if it's a migration it's already indexed
       const pairs = await dexPairs([msg.mint]).catch(()=>[]);
-      if (pairs.length>0) {
+      if (pairs.length > 0) {
+        console.log(`[SRC-A] Immediate hit: ${pairs[0].baseToken?.symbol}`);
         await processToken(pairs[0], "a");
       } else {
-        // Build minimal token object from PumpPortal data alone
-        const minimal = {
-          pairAddress: msg.mint,
-          priceUsd:    msg.marketCapSol?(msg.marketCapSol*10).toString():"0",
-          baseToken:   { symbol:msg.symbol||"???", name:msg.name||"", address:msg.mint },
-          liquidity:   { usd:(msg.vSolInBondingCurve||0)*150 },
-          volume:      { m5:msg.initialBuy||0, h1:msg.initialBuy||0 },
-          priceChange: { m5:"0", h1:"0" },
-          txns:        { m5:{ buys:1, sells:0 } },
-          pairCreatedAt: Date.now()-(ageMin*60000),
-          url:         `https://dexscreener.com/solana/${msg.mint}`,
-          boosts:      { active:0 },
-        };
-        await processToken(minimal, "a");
+        // New launch — not indexed yet. Queue for retry in 30s.
+        if (!ppMintQueue.has(msg.mint)) {
+          ppMintQueue.set(msg.mint, {
+            receivedAt: Date.now(),
+            symbol: msg.symbol||"???",
+            name:   msg.name||"",
+            retries: 0,
+          });
+          console.log(`[SRC-A] Queued ${msg.symbol||msg.mint.slice(0,8)} for retry (${ppMintQueue.size} in queue)`);
+        }
       }
     } catch(e) {
       sysErr("pumpportal", e.message);
@@ -952,27 +975,49 @@ function connectHelIUS() {
       const msg = JSON.parse(data.toString());
       sysStatus.sources.b.lastMsg = new Date().toISOString();
 
-      // Extract token mint from log messages
-      const logs = msg?.params?.result?.value?.logs||[];
-      const sig  = msg?.params?.result?.value?.signature;
+      // Helius logsSubscribe result structure
+      const value = msg?.params?.result?.value;
+      if (!value) return;
 
-      // Look for "create" instructions (new token launches)
-      const isCreate = logs.some(l=>l.includes("Program log: Instruction: Create")||l.includes("initialize_account"));
+      const logs = value.logs||[];
+      const sig  = value.signature;
+
+      // Pump.fun create events — multiple patterns to catch all formats
+      const isCreate = logs.some(l=>
+        l.includes("Instruction: Create")||
+        l.includes("Instruction: InitializeMint")||
+        l.includes("create_bonding_curve")||
+        l.includes("Program log: Instruction: Buy") // First buy = token just launched
+      );
       if (!isCreate) return;
 
-      // Extract token address from logs
-      const mintLog = logs.find(l=>l.includes("mint:"));
-      if (!mintLog) return;
+      // Extract potential mint addresses from all log lines
+      // Pump.fun logs format: "Program data: ..." containing base58 addresses
+      const mints = new Set();
+      for (const log of logs) {
+        // Look for base58 addresses (32-44 chars) that look like Solana pubkeys
+        const matches = log.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g)||[];
+        for (const m of matches) {
+          // Filter out known program addresses and obvious non-mints
+          if (m !== PUMPFUN_PROGRAM && m !== RAYDIUM_PROGRAM && m.length>=32) {
+            mints.add(m);
+          }
+        }
+      }
 
-      const mintMatch = mintLog.match(/mint:\s*([A-Za-z0-9]{32,50})/);
-      if (!mintMatch) return;
-      const mint = mintMatch[1];
+      if (!mints.size) return;
 
-      // Fetch pair data from DexScreener
-      await delay(2000); // Wait 2s for DexScreener to index it
-      const pairs = await dexPairs([mint]).catch(()=>[]);
-      if (pairs.length>0) {
-        await processToken(pairs[0], "b");
+      sysStatus.sources.b.tokensReceived++;
+
+      // Try each extracted address against DexScreener after a short delay
+      await delay(3000);
+      for (const mint of mints) {
+        const pairs = await dexPairs([mint]).catch(()=>[]);
+        if (pairs.length > 0 && pairs[0].chainId==="solana") {
+          console.log(`[SRC-B] Helius found: ${pairs[0].baseToken?.symbol}`);
+          await processToken(pairs[0], "b");
+          break; // Found the token, stop checking other addresses
+        }
       }
     } catch(e) {
       sysErr("helius", e.message);
