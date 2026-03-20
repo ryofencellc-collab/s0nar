@@ -1,7 +1,7 @@
 {
   "name": "s0nar",
-  "version": "9.5.0",
-  "description": "S0NAR Wave Rider v9.5 \u2014 4-Strategy Momentum Trading",
+  "version": "10.0.0",
+  "description": "S0NAR Wave Rider v10.0 — 5 Sources × 10 Variants = 50 Trading Slots",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -13,6 +13,7 @@
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "node-fetch": "^2.7.0",
-    "pg": "^8.11.3"
+    "pg": "^8.11.3",
+    "ws": "^8.16.0"
   }
 }
