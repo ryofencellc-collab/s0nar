@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — IRON DOME v11.0
+//  S0NAR — IRON DOME v12.0
 //  4 Algorithms. DexScreener only. No WebSockets. No complexity.
 //
 //  THE ONE FIX: DexScreener 429 backoff.
@@ -70,7 +70,14 @@ const TRADE_COLS = `
   rug_score INTEGER DEFAULT 0,
   algo TEXT,
   opened_at TIMESTAMPTZ DEFAULT NOW(),
-  closed_at TIMESTAMPTZ
+  closed_at TIMESTAMPTZ,
+  exit_fomo INTEGER DEFAULT 0,
+  exit_liq NUMERIC DEFAULT 0,
+  exit_vol_5m NUMERIC DEFAULT 0,
+  exit_pc_5m NUMERIC DEFAULT 0,
+  exit_buys_5m INTEGER DEFAULT 0,
+  exit_sells_5m INTEGER DEFAULT 0,
+  hold_minutes NUMERIC DEFAULT 0
 `;
 
 const SIGNAL_COLS = `
@@ -97,10 +104,17 @@ async function initDB() {
     await db(`CREATE INDEX IF NOT EXISTS idx_tr_${k}_opened ON trades_${k}(opened_at DESC)`);
     await db(`CREATE INDEX IF NOT EXISTS idx_tr_${k}_ticker ON trades_${k}(ticker, opened_at DESC)`);
     await db(`CREATE INDEX IF NOT EXISTS idx_sig_${k}_seen  ON signals_${k}(seen_at DESC)`);
-    // Safe migrations
+    // Safe migrations — add columns if they don't exist
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS rug_score INTEGER DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_fomo INTEGER DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_liq NUMERIC DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_vol_5m NUMERIC DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_pc_5m NUMERIC DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_buys_5m INTEGER DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_sells_5m INTEGER DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS hold_minutes NUMERIC DEFAULT 0`).catch(() => {});
   }
-  console.log("DB ready — v11.0 (4 algo tables)");
+  console.log("DB ready — v12.0 (exit snapshots enabled)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -164,8 +178,10 @@ const ALGOS = {
     minLiq: 5000, minVol5m: 150, minBuyPct: 50,
     minAge: 3,    maxAge: 480,
     minPc5m: -5,  maxPc5m: 85,
-    baseBet: 40,
-    stopLoss: 0.82, earlyStop: 0.86, earlyStopMinutes: 5,
+    baseBet: 35,
+    // Tightened stop 0.82→0.87 and early stop 0.86→0.90 — cuts losses faster
+    // Avg loss was $10.27 vs avg win $4.69 — this closes that gap
+    stopLoss: 0.87, earlyStop: 0.91, earlyStopMinutes: 5,
     trailingPct: 0.84, trailingActivateMin: 15,
     tier1: 1.30, tier1Sell: 0.65,
     tier2: 1.70, tier2Sell: 0.25,
@@ -730,10 +746,27 @@ async function insertTrade(algoKey, p, sc, fomo, rugScore) {
   return r.rows[0];
 }
 
-async function closeTrade(algoKey, id, res) {
+async function closeTrade(algoKey, id, res, snap = {}) {
+  const holdMin = snap.openedAt
+    ? +((Date.now() - new Date(snap.openedAt).getTime()) / 60000).toFixed(1)
+    : 0;
   await db(
-    `UPDATE trades_${algoKey} SET status='CLOSED',exit_mult=$1,highest_mult=$2,pnl=$3,exit_reason=$4,closed_at=NOW() WHERE id=$5`,
-    [res.mult, res.highMult, res.pnl, res.exit, id]
+    `UPDATE trades_${algoKey}
+     SET status='CLOSED', exit_mult=$1, highest_mult=$2, pnl=$3, exit_reason=$4, closed_at=NOW(),
+         exit_fomo=$5, exit_liq=$6, exit_vol_5m=$7, exit_pc_5m=$8,
+         exit_buys_5m=$9, exit_sells_5m=$10, hold_minutes=$11
+     WHERE id=$12`,
+    [
+      res.mult, res.highMult, res.pnl, res.exit,
+      snap.fomo    || 0,
+      snap.liq     || 0,
+      snap.vol5m   || 0,
+      snap.pc5m    || 0,
+      snap.buys5m  || 0,
+      snap.sells5m || 0,
+      holdMin,
+      id,
+    ]
   );
   try {
     const row = (await db(`SELECT pair_address FROM trades_${algoKey} WHERE id=$1`, [id])).rows[0];
@@ -937,14 +970,27 @@ async function checkPositions() {
           const entryLiq = parseFloat(trade.liq || 0);
           const curFomo  = calcFomoScore(pair);
 
+          // Exit snapshot — what the market looks like RIGHT NOW at close time
+          const snap = {
+            fomo:    curFomo,
+            liq:     curLiq,
+            vol5m:   pair.volume?.m5 || 0,
+            pc5m:    parseFloat(pair.priceChange?.m5 || 0),
+            buys5m:  pair.txns?.m5?.buys  || 0,
+            sells5m: pair.txns?.m5?.sells || 0,
+            openedAt: trade.opened_at,
+          };
+
+          // Velocity check — detect tokens crashing between poll cycles
+          // Tightened from -25% to -15% so we exit before the full rug hits
           const liqCollapse = entryLiq > 5000 && curLiq < entryLiq * 0.35;
-          const hardDump    = pct < -25;
+          const hardDump    = pct < -15;
 
           if ((liqCollapse || hardDump) && res.status === "OPEN") {
             const mult   = curPrice / parseFloat(trade.entry_price);
             const rugPnl = +(parseFloat(trade.bet_size) * (mult - 1)).toFixed(2);
             const reason = liqCollapse ? "LIQ_PULLED" : "HARD_DUMP";
-            await closeTrade(algoKey, trade.id, { mult, pnl: rugPnl, exit: reason, highMult: Math.max(parseFloat(trade.highest_mult || 1), mult) });
+            await closeTrade(algoKey, trade.id, { mult, pnl: rugPnl, exit: reason, highMult: Math.max(parseFloat(trade.highest_mult || 1), mult) }, snap);
             st.dailyPnl += rugPnl;
             console.log(`  [${algoKey.toUpperCase()}] ${reason} ${trade.ticker} ${pct.toFixed(0)}% $${rugPnl}`);
             continue;
@@ -962,7 +1008,7 @@ async function checkPositions() {
               fomoFadeCounter.delete(fadeKey);
               const mult    = curPrice / parseFloat(trade.entry_price);
               const fadePnl = +(parseFloat(trade.bet_size) * (mult - 1)).toFixed(2);
-              await closeTrade(algoKey, trade.id, { mult, pnl: fadePnl, exit: "FOMO_FADE", highMult: res.highMult });
+              await closeTrade(algoKey, trade.id, { mult, pnl: fadePnl, exit: "FOMO_FADE", highMult: res.highMult }, snap);
               st.dailyPnl += fadePnl;
               console.log(`  [${algoKey.toUpperCase()}] FOMO_FADE ${trade.ticker} +${pct.toFixed(0)}% $${fadePnl}`);
             }
@@ -970,7 +1016,7 @@ async function checkPositions() {
           } else { fomoFadeCounter.delete(`${algoKey}_${trade.id}`); }
 
           if (res.status === "CLOSED") {
-            await closeTrade(algoKey, trade.id, res);
+            await closeTrade(algoKey, trade.id, res, snap);
             st.dailyPnl += res.pnl;
             checkCircuit(algoKey);
             console.log(`  [${algoKey.toUpperCase()}] CLOSED ${trade.ticker} ${res.exit} ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`);
@@ -1074,7 +1120,7 @@ async function getAlgoStats(algoKey) {
 
 // ── API ROUTES ─────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({
-  status: "ok", ts: new Date().toISOString(), version: "11.0",
+  status: "ok", ts: new Date().toISOString(), version: "12.0",
   marketMood: mood, pollCount,
   dexStatus: dexIsBlocked() ? `blocked_until_${new Date(dexBackoffUntil).toISOString()}` : "ok",
   algos: Object.fromEntries(ALGO_KEYS.map(k => [k, {
@@ -1208,7 +1254,7 @@ app.get("/api/system", async (req, res) => {
       openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
     }
     res.json({
-      ts: new Date().toISOString(), version: "11.0",
+      ts: new Date().toISOString(), version: "12.0",
       uptime: Math.round(process.uptime()), pollCount, marketMood: mood,
       dexStatus: dexIsBlocked() ? `blocked_${Math.round((dexBackoffUntil - Date.now()) / 1000)}s` : "ok",
       dexBackoffCount,
@@ -1220,15 +1266,68 @@ app.get("/api/system", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get("/api/report", async (req, res) => {
+  try {
+    // One URL — everything needed for full analysis
+    const [stats, systemData] = await Promise.all([
+      Promise.all(ALGO_KEYS.map(k => getAlgoStats(k))),
+      (async () => {
+        const openCounts = {};
+        for (const k of ALGO_KEYS) {
+          const r = await db(`SELECT COUNT(*) AS n FROM trades_${k} WHERE status='OPEN'`).catch(() => null);
+          openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
+        }
+        return openCounts;
+      })(),
+    ]);
+
+    const trades = {};
+    const debug  = {};
+    for (const k of ALGO_KEYS) {
+      const tRows = (await db(`SELECT * FROM trades_${k} ORDER BY opened_at DESC LIMIT 200`)).rows;
+      trades[k] = tRows;
+
+      const sRows = (await db(`SELECT ticker, score, fomo_score, liq, vol_5m, pc_5m, age_min, entered, skip_reason, seen_at FROM signals_${k} ORDER BY seen_at DESC LIMIT 50`)).rows;
+      const tally = {};
+      sRows.filter(s => s.skip_reason).forEach(s => {
+        s.skip_reason.split("; ").forEach(r => { const key = r.split("_").slice(0, 3).join("_"); tally[key] = (tally[key] || 0) + 1; });
+      });
+      debug[k] = {
+        name: ALGOS[k].name,
+        summary: {
+          total: sRows.length,
+          entered: sRows.filter(s => s.entered).length,
+          skipped: sRows.filter(s => !s.entered).length,
+          skipReasons: Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 10),
+        },
+      };
+    }
+
+    res.json({
+      ts: new Date().toISOString(),
+      version: "12.0",
+      uptime: Math.round(process.uptime()),
+      pollCount,
+      marketMood: mood,
+      dexStatus: dexIsBlocked() ? `blocked_${Math.round((dexBackoffUntil - Date.now()) / 1000)}s` : "ok",
+      funnel: sysStatus.funnel,
+      openTrades: systemData,
+      stats,
+      trades,
+      debug,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Iron Dome v11.0 running.");
+  res.status(200).send("S0NAR Iron Dome v12.0 running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR IRON DOME v11.0 | Port:${PORT}`);
+  console.log(`\nS0NAR IRON DOME v12.0 | Port:${PORT}`);
   console.log(`Algos: WAVE | SURGE | STEADY | ROCKET`);
   console.log(`Poll: ${FETCH_MS}ms (slow/safe) | Check: ${CHECK_MS}ms | 429 backoff: active\n`);
   await initDB();
