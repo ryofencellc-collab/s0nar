@@ -1,5 +1,5 @@
 // ============================================================
-//  S0NAR — IRON DOME v12.0
+//  S0NAR — IRON DOME v13.0
 //  4 Algorithms. DexScreener only. No WebSockets. No complexity.
 //
 //  THE ONE FIX: DexScreener 429 backoff.
@@ -114,7 +114,7 @@ async function initDB() {
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_sells_5m INTEGER DEFAULT 0`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS hold_minutes NUMERIC DEFAULT 0`).catch(() => {});
   }
-  console.log("DB ready — v12.0 (exit snapshots enabled)");
+  console.log("DB ready — v13.0 (exit snapshots enabled)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -159,7 +159,7 @@ const ALGOS = {
     color: "#00e5ff",
     minScore: 38, maxScore: 99,
     minFomo: 10,  maxFomo: 80,
-    minLiq: 5000, minVol5m: 150, minBuyPct: 50,
+    minLiq: 8000, minVol5m: 150, minBuyPct: 50,
     minAge: 10,   maxAge: 180,
     minPc5m: -5,  maxPc5m: 80,
     baseBet: 50,
@@ -175,12 +175,10 @@ const ALGOS = {
     color: "#ff6d00",
     minScore: 38, maxScore: 99,
     minFomo: 15,  maxFomo: 85,
-    minLiq: 5000, minVol5m: 150, minBuyPct: 50,
+    minLiq: 8000, minVol5m: 150, minBuyPct: 50,
     minAge: 3,    maxAge: 480,
     minPc5m: -5,  maxPc5m: 85,
     baseBet: 35,
-    // Tightened stop 0.82→0.87 and early stop 0.86→0.90 — cuts losses faster
-    // Avg loss was $10.27 vs avg win $4.69 — this closes that gap
     stopLoss: 0.87, earlyStop: 0.91, earlyStopMinutes: 5,
     trailingPct: 0.84, trailingActivateMin: 15,
     tier1: 1.30, tier1Sell: 0.65,
@@ -611,14 +609,19 @@ function algoGate(p, sc, fomo, z, algoKey) {
   return { pass: failed.length === 0, failed };
 }
 
-function betSize(sc, algoKey, liq) {
+function betSize(sc, algoKey, liq, ageMin) {
   const cfg   = ALGOS[algoKey];
   const base  = cfg.baseBet;
   const range = cfg.maxScore - cfg.minScore;
   const pct   = range > 0 ? (sc - cfg.minScore) / range : 0.5;
   const mult  = 0.8 + pct * 0.4;
   const liqCap = liq > 0 ? Math.max(10, liq * 0.001) : 150;
-  return Math.min(liqCap, Math.min(150, Math.max(15, Math.round((base * mult) / 5) * 5)));
+  const raw  = Math.min(liqCap, Math.min(150, Math.max(15, Math.round((base * mult) / 5) * 5)));
+  // Cap bets on young tokens for WAVE and SURGE — data shows rugs cluster under 30min
+  if ((algoKey === "a" || algoKey === "b") && ageMin < 30) {
+    return Math.min(raw, 25);
+  }
+  return raw;
 }
 
 function calcPnL(trade, curPrice) {
@@ -698,8 +701,8 @@ async function hadTrade(algoKey, pairAddr, ticker, name) {
 
 async function insertTrade(algoKey, p, sc, fomo, rugScore) {
   const liq      = p.liquidity?.usd || 0;
-  const bet      = betSize(sc, algoKey, liq);
   const age      = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : 0;
+  const bet      = betSize(sc, algoKey, liq, age);
   const tokenAddr = p.baseToken?.address || p.pairAddress;
 
   const r = await db(
@@ -1319,24 +1322,84 @@ app.get("/api/report", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── FAST CHECK — high-risk positions only ─────────────────
+// Runs every 10s. Only checks trades that match the rug profile:
+// high FOMO at entry + young token + lower liq = most likely to crash fast.
+// Normal checkPositions still runs every 25s for everything else.
+async function checkHighRiskPositions() {
+  if (dexIsBlocked()) return;
+  for (const algoKey of ALGO_KEYS) {
+    try {
+      const open = await getOpen(algoKey);
+      // Only care about trades that are young and entered with high FOMO
+      const highRisk = open.filter(t => {
+        const holdMin = (Date.now() - new Date(t.opened_at).getTime()) / 60000;
+        return holdMin < 20 && parseInt(t.fomo_score || 0) >= 60;
+      });
+      if (!highRisk.length) continue;
+
+      const addrs   = highRisk.map(t => t.pair_address);
+      const pairs   = await dexPairs(addrs).catch(() => []);
+      const pairMap = new Map(pairs.map(p => [p.pairAddress, p]));
+
+      for (const trade of highRisk) {
+        try {
+          const st   = algoState[algoKey];
+          const pair = pairMap.get(trade.pair_address);
+          if (!pair) continue;
+
+          const curPrice = parseFloat(pair.priceUsd);
+          if (!curPrice || curPrice <= 0) continue;
+
+          const pct    = ((curPrice / parseFloat(trade.entry_price)) - 1) * 100;
+          const curLiq = pair.liquidity?.usd || 0;
+          const entryLiq = parseFloat(trade.liq || 0);
+
+          const liqCollapse = entryLiq > 5000 && curLiq < entryLiq * 0.35;
+          const hardDump    = pct < -15;
+
+          if ((liqCollapse || hardDump)) {
+            const mult   = curPrice / parseFloat(trade.entry_price);
+            const rugPnl = +(parseFloat(trade.bet_size) * (mult - 1)).toFixed(2);
+            const reason = liqCollapse ? "LIQ_PULLED" : "HARD_DUMP";
+            const snap = {
+              fomo:    calcFomoScore(pair),
+              liq:     curLiq,
+              vol5m:   pair.volume?.m5 || 0,
+              pc5m:    parseFloat(pair.priceChange?.m5 || 0),
+              buys5m:  pair.txns?.m5?.buys  || 0,
+              sells5m: pair.txns?.m5?.sells || 0,
+              openedAt: trade.opened_at,
+            };
+            await closeTrade(algoKey, trade.id, { mult, pnl: rugPnl, exit: reason, highMult: Math.max(parseFloat(trade.highest_mult || 1), mult) }, snap);
+            st.dailyPnl += rugPnl;
+            console.log(`  [FAST-${algoKey.toUpperCase()}] ${reason} ${trade.ticker} ${pct.toFixed(0)}% $${rugPnl}`);
+          }
+        } catch (e) { console.error(`  fastCheck [${algoKey}] ${trade.ticker}:`, e.message); }
+      }
+    } catch (e) { console.error(`checkHighRisk-${algoKey}:`, e.message); }
+  }
+}
+
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Iron Dome v12.0 running.");
+  res.status(200).send("S0NAR Iron Dome v13.0 running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR IRON DOME v12.0 | Port:${PORT}`);
+  console.log(`\nS0NAR IRON DOME v13.0 | Port:${PORT}`);
   console.log(`Algos: WAVE | SURGE | STEADY | ROCKET`);
-  console.log(`Poll: ${FETCH_MS}ms (slow/safe) | Check: ${CHECK_MS}ms | 429 backoff: active\n`);
+  console.log(`Poll: ${FETCH_MS}ms | Check: ${CHECK_MS}ms | FastCheck: 10s | 429 backoff: active\n`);
   await initDB();
   await refreshDaily();
   await updateMood();
   setTimeout(pollSignals, 3000);
-  setInterval(pollSignals,    FETCH_MS);
-  setInterval(checkPositions, CHECK_MS);
-  setInterval(updateMood,     5 * 60 * 1000);
-  setInterval(refreshDaily,   2 * 60 * 1000);
-  setInterval(cleanupSignals, 6 * 60 * 60 * 1000);
+  setInterval(pollSignals,              FETCH_MS);
+  setInterval(checkPositions,           CHECK_MS);
+  setInterval(checkHighRiskPositions,   10000);   // Fast check every 10s for young high-FOMO trades
+  setInterval(updateMood,               5 * 60 * 1000);
+  setInterval(refreshDaily,             2 * 60 * 1000);
+  setInterval(cleanupSignals,           6 * 60 * 60 * 1000);
 });
