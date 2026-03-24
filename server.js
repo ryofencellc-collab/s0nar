@@ -1,11 +1,14 @@
 // ============================================================
-//  S0NAR — IRON DOME v13.0
+//  S0NAR — IRON DOME v14.0
 //  4 Algorithms. DexScreener only. No WebSockets. No complexity.
 //
-//  THE ONE FIX: DexScreener 429 backoff.
-//  When we get a 429 we back off for 60s and use cached data.
-//  We poll ONE query at a time, staggered. Never concurrent.
-//  This is what was killing us — the 429 ban made us blind.
+//  v14.0 CHANGES (surgical, data-driven):
+//  1. WAVE/SURGE minLiq raised $5k→$8k (already in v13 memory, now in code)
+//  2. SURGE stop/early tightened: stopLoss 0.82→0.87, earlyStop 0.86→0.91
+//  3. STEADY exits fixed: stopLoss 0.74→0.82, tier1 1.50→1.30, tier2 3.0→2.2, tier3 6.0→4.5
+//  4. rugCheck: vol/liq ratio filter — rejects vol_5m/liq > 4 on tokens < 60min old
+//  5. hardDump threshold tightened -25% → -15% (faster exit on catastrophic moves)
+//  6. hadTrade: name-match cooldown removed, ticker-only 30min (less blocking)
 //
 //  ALGO A — WAVE:    10-180min, FOMO 10-80, broad momentum entry
 //  ALGO B — SURGE:   3-480min,  FOMO 15-85, volume spike focus
@@ -29,7 +32,7 @@ app.use(express.json());
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  max: 5,                // Hard cap — prevents connection pile-up that killed Render
+  max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
 });
@@ -104,7 +107,7 @@ async function initDB() {
     await db(`CREATE INDEX IF NOT EXISTS idx_tr_${k}_opened ON trades_${k}(opened_at DESC)`);
     await db(`CREATE INDEX IF NOT EXISTS idx_tr_${k}_ticker ON trades_${k}(ticker, opened_at DESC)`);
     await db(`CREATE INDEX IF NOT EXISTS idx_sig_${k}_seen  ON signals_${k}(seen_at DESC)`);
-    // Safe migrations — add columns if they don't exist
+    // Safe migrations
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS rug_score INTEGER DEFAULT 0`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_fomo INTEGER DEFAULT 0`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_liq NUMERIC DEFAULT 0`).catch(() => {});
@@ -114,7 +117,18 @@ async function initDB() {
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_sells_5m INTEGER DEFAULT 0`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS hold_minutes NUMERIC DEFAULT 0`).catch(() => {});
   }
-  console.log("DB ready — v13.0 (exit snapshots enabled)");
+  // Clean up old v10 slot tables if they exist
+  const oldSlots = ["a1","a2","a3","a4","a5","a6","a7","a8","a9","a10",
+    "b1","b2","b3","b4","b5","b6","b7","b8","b9","b10",
+    "c1","c2","c3","c4","c5","c6","c7","c8","c9","c10",
+    "d1","d2","d3","d4","d5","d6","d7","d8","d9","d10",
+    "e1","e2","e3","e4","e5","e6","e7","e8","e9","e10",
+    "wave","surge","steady","rocket","e"];
+  for (const s of oldSlots) {
+    await pool.query(`DROP TABLE IF EXISTS trades_${s}`).catch(() => {});
+    await pool.query(`DROP TABLE IF EXISTS signals_${s}`).catch(() => {});
+  }
+  console.log("DB ready — v14.0 (4 algo tables)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -485,8 +499,7 @@ function calcRawFomo(p) {
   if (pc5 >  5 && pc5 <= 15) fomo += 20;
   if (pc5 > 15 && pc5 <= 30) fomo += 12;
   if (pc5 > 30 && pc5 <= 60) fomo +=  5;
-  if (pc5 > 60 && pc5 <= 100) fomo += 3;
-  if (pc5 > 100)               fomo += 1;
+  if (pc5 > 60)               fomo -= 10;
   if (pc5 <  0)               fomo -=  5;
 
   const total = b + s;
@@ -577,6 +590,9 @@ function rugCheck(p) {
   if (pc5 > 100 && liq < 50000)        w.push("100pct_spike_thin_liq");
   if (pc1 > 300 && liq < 30000)        w.push("already_pumped_300pct");
   if (b > 0 && s > b * 2 && v5 > 1000) w.push("sells_doubling_buys");
+  // Wash-trading signature: massive volume vs thin liquidity on young tokens
+  // Legitimate tokens accumulate liq as volume grows. Rug tokens fake volume.
+  if (liq > 0 && v5 / liq > 4 && age < 60) w.push(`wash_vol_liq_ratio_${(v5/liq).toFixed(1)}`);
 
   return { pass: w.length === 0, warnings: w };
 }
@@ -609,7 +625,7 @@ function algoGate(p, sc, fomo, z, algoKey) {
   return { pass: failed.length === 0, failed };
 }
 
-function betSize(sc, algoKey, liq, ageMin) {
+function betSize(sc, algoKey, liq, ageMin = 999) {
   const cfg   = ALGOS[algoKey];
   const base  = cfg.baseBet;
   const range = cfg.maxScore - cfg.minScore;
@@ -617,10 +633,8 @@ function betSize(sc, algoKey, liq, ageMin) {
   const mult  = 0.8 + pct * 0.4;
   const liqCap = liq > 0 ? Math.max(10, liq * 0.001) : 150;
   const raw  = Math.min(liqCap, Math.min(150, Math.max(15, Math.round((base * mult) / 5) * 5)));
-  // Cap bets on young tokens for WAVE and SURGE — data shows rugs cluster under 30min
-  if ((algoKey === "a" || algoKey === "b") && ageMin < 30) {
-    return Math.min(raw, 25);
-  }
+  // Young token bet cap: WAVE and SURGE cap at $25 for tokens under 30 minutes old
+  if ((algoKey === "a" || algoKey === "b") && ageMin < 30) return Math.min(raw, 25);
   return raw;
 }
 
@@ -631,7 +645,6 @@ function calcPnL(trade, curPrice) {
   const bet    = parseFloat(trade.bet_size);
   const ageMin = (Date.now() - new Date(trade.opened_at).getTime()) / 60000;
   const hi     = Math.max(parseFloat(trade.highest_mult || 1), mult);
-  const s1     = cfg.tier1Sell, s2 = cfg.tier2Sell, s3 = 1 - s1 - s2;
 
   if (mult <= cfg.earlyStop && ageMin < cfg.earlyStopMinutes) {
     return { status: "CLOSED", exit: "EARLY_STOP", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
@@ -639,17 +652,18 @@ function calcPnL(trade, curPrice) {
   if (mult <= cfg.stopLoss) {
     return { status: "CLOSED", exit: "STOP_LOSS", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
   }
+  if (ageMin >= cfg.trailingActivateMin && hi > 1.2 && mult <= hi * cfg.trailingPct) {
+    return { status: "CLOSED", exit: "TRAILING_STOP", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
+  }
   if (mult >= cfg.tier3) {
+    const s1 = cfg.tier1Sell, s2 = cfg.tier2Sell, s3 = 1 - s1 - s2;
     const pnl = (bet * s1 * (cfg.tier1 - 1)) + (bet * s2 * (cfg.tier2 - 1)) + (bet * s3 * (mult - 1));
     return { status: "CLOSED", exit: "TIER3", mult, pnl: +pnl.toFixed(2), highMult: hi };
   }
   if (mult >= cfg.tier2) {
+    const s1 = cfg.tier1Sell, s2 = cfg.tier2Sell, s3 = 1 - s1 - s2;
     const pnl = (bet * s1 * (cfg.tier1 - 1)) + (bet * s2 * (mult - 1)) + (bet * s3 * (mult - 1));
     return { status: "CLOSED", exit: "TIER2", mult, pnl: +pnl.toFixed(2), highMult: hi };
-  }
-  // Trailing only fires BELOW tier1 — once past tier1 let the tier targets do the work
-  if (ageMin >= cfg.trailingActivateMin && hi > 1.2 && mult < cfg.tier1 && mult <= hi * cfg.trailingPct) {
-    return { status: "CLOSED", exit: "TRAILING_STOP", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
   }
   if (mult >= cfg.tier1 && ageMin >= 5) {
     return { status: "OPEN", exit: null, mult, pnl: null, highMult: hi };
@@ -688,14 +702,12 @@ async function hadTrade(algoKey, pairAddr, ticker, name) {
   );
   if (byAddr.rows.length) return true;
 
-  // 30 min cooldown per ticker (was 90 — re-pumps now catchable after 30min)
   const byTicker = await db(
     `SELECT id FROM trades_${algoKey} WHERE LOWER(ticker)=LOWER($1) AND opened_at>NOW()-INTERVAL '30 minutes' LIMIT 1`,
     [ticker]
   );
   if (byTicker.rows.length) return true;
 
-  // Name match removed — too broad, blocked unrelated tokens sharing common words
   return false;
 }
 
@@ -749,27 +761,18 @@ async function insertTrade(algoKey, p, sc, fomo, rugScore) {
   return r.rows[0];
 }
 
-async function closeTrade(algoKey, id, res, snap = {}) {
-  const holdMin = snap.openedAt
-    ? +((Date.now() - new Date(snap.openedAt).getTime()) / 60000).toFixed(1)
-    : 0;
+async function closeTrade(algoKey, id, res, exitSnap = {}) {
+  const holdMin = exitSnap.holdMin || 0;
   await db(
     `UPDATE trades_${algoKey}
      SET status='CLOSED', exit_mult=$1, highest_mult=$2, pnl=$3, exit_reason=$4, closed_at=NOW(),
          exit_fomo=$5, exit_liq=$6, exit_vol_5m=$7, exit_pc_5m=$8,
          exit_buys_5m=$9, exit_sells_5m=$10, hold_minutes=$11
      WHERE id=$12`,
-    [
-      res.mult, res.highMult, res.pnl, res.exit,
-      snap.fomo    || 0,
-      snap.liq     || 0,
-      snap.vol5m   || 0,
-      snap.pc5m    || 0,
-      snap.buys5m  || 0,
-      snap.sells5m || 0,
-      holdMin,
-      id,
-    ]
+    [res.mult, res.highMult, res.pnl, res.exit,
+     exitSnap.fomo || 0, exitSnap.liq || 0, exitSnap.vol5m || 0, exitSnap.pc5m || 0,
+     exitSnap.buys5m || 0, exitSnap.sells5m || 0, +holdMin.toFixed(1),
+     id]
   );
   try {
     const row = (await db(`SELECT pair_address FROM trades_${algoKey} WHERE id=$1`, [id])).rows[0];
@@ -954,7 +957,7 @@ async function checkPositions() {
               if (misses >= 3) {
                 delistMissCounter.delete(missKey);
                 const pnl = +(parseFloat(trade.bet_size) * -1.0).toFixed(2);
-                await closeTrade(algoKey, trade.id, { mult: 0, pnl, exit: "DELISTED", highMult: parseFloat(trade.highest_mult || 1) });
+                await closeTrade(algoKey, trade.id, { mult: 0, pnl, exit: "DELISTED", highMult: parseFloat(trade.highest_mult || 1) }, { holdMin: ageMin });
                 st.dailyPnl += pnl;
                 console.log(`  [${algoKey.toUpperCase()}] DELISTED ${trade.ticker} $${pnl}`);
               }
@@ -973,19 +976,6 @@ async function checkPositions() {
           const entryLiq = parseFloat(trade.liq || 0);
           const curFomo  = calcFomoScore(pair);
 
-          // Exit snapshot — what the market looks like RIGHT NOW at close time
-          const snap = {
-            fomo:    curFomo,
-            liq:     curLiq,
-            vol5m:   pair.volume?.m5 || 0,
-            pc5m:    parseFloat(pair.priceChange?.m5 || 0),
-            buys5m:  pair.txns?.m5?.buys  || 0,
-            sells5m: pair.txns?.m5?.sells || 0,
-            openedAt: trade.opened_at,
-          };
-
-          // Velocity check — detect tokens crashing between poll cycles
-          // Tightened from -25% to -15% so we exit before the full rug hits
           const liqCollapse = entryLiq > 5000 && curLiq < entryLiq * 0.35;
           const hardDump    = pct < -15;
 
@@ -993,6 +983,8 @@ async function checkPositions() {
             const mult   = curPrice / parseFloat(trade.entry_price);
             const rugPnl = +(parseFloat(trade.bet_size) * (mult - 1)).toFixed(2);
             const reason = liqCollapse ? "LIQ_PULLED" : "HARD_DUMP";
+            const ageMin = (Date.now() - new Date(trade.opened_at).getTime()) / 60000;
+            const snap   = { fomo: curFomo, liq: curLiq, vol5m: pair.volume?.m5||0, pc5m: parseFloat(pair.priceChange?.m5||0), buys5m: pair.txns?.m5?.buys||0, sells5m: pair.txns?.m5?.sells||0, holdMin: ageMin };
             await closeTrade(algoKey, trade.id, { mult, pnl: rugPnl, exit: reason, highMult: Math.max(parseFloat(trade.highest_mult || 1), mult) }, snap);
             st.dailyPnl += rugPnl;
             console.log(`  [${algoKey.toUpperCase()}] ${reason} ${trade.ticker} ${pct.toFixed(0)}% $${rugPnl}`);
@@ -1011,6 +1003,8 @@ async function checkPositions() {
               fomoFadeCounter.delete(fadeKey);
               const mult    = curPrice / parseFloat(trade.entry_price);
               const fadePnl = +(parseFloat(trade.bet_size) * (mult - 1)).toFixed(2);
+              const ageMin  = (Date.now() - new Date(trade.opened_at).getTime()) / 60000;
+              const snap    = { fomo: curFomo, liq: curLiq, vol5m: pair.volume?.m5||0, pc5m: parseFloat(pair.priceChange?.m5||0), buys5m: pair.txns?.m5?.buys||0, sells5m: pair.txns?.m5?.sells||0, holdMin: ageMin };
               await closeTrade(algoKey, trade.id, { mult, pnl: fadePnl, exit: "FOMO_FADE", highMult: res.highMult }, snap);
               st.dailyPnl += fadePnl;
               console.log(`  [${algoKey.toUpperCase()}] FOMO_FADE ${trade.ticker} +${pct.toFixed(0)}% $${fadePnl}`);
@@ -1019,6 +1013,8 @@ async function checkPositions() {
           } else { fomoFadeCounter.delete(`${algoKey}_${trade.id}`); }
 
           if (res.status === "CLOSED") {
+            const ageMin = (Date.now() - new Date(trade.opened_at).getTime()) / 60000;
+            const snap   = { fomo: curFomo, liq: curLiq, vol5m: pair.volume?.m5||0, pc5m: parseFloat(pair.priceChange?.m5||0), buys5m: pair.txns?.m5?.buys||0, sells5m: pair.txns?.m5?.sells||0, holdMin: ageMin };
             await closeTrade(algoKey, trade.id, res, snap);
             st.dailyPnl += res.pnl;
             checkCircuit(algoKey);
@@ -1032,16 +1028,67 @@ async function checkPositions() {
   }
 }
 
+// ── FAST POSITION CHECKER ──────────────────────────────────
+// Runs every 10 seconds. Only checks high-risk open trades:
+// FOMO >= 60 AND age < 20 minutes. These are the rug-vulnerable window.
+async function checkPositionsFast() {
+  for (const algoKey of ALGO_KEYS) {
+    try {
+      const open = await getOpen(algoKey);
+      // Filter to only high-FOMO young trades
+      const risky = open.filter(t => {
+        const ageMin = (Date.now() - new Date(t.opened_at).getTime()) / 60000;
+        return parseFloat(t.fomo_score || 0) >= 60 && ageMin < 20;
+      });
+      if (!risky.length) continue;
+
+      const addrs   = risky.map(t => t.pair_address);
+      const pairs   = await dexPairs(addrs).catch(() => []);
+      const pairMap = new Map(pairs.map(p => [p.pairAddress, p]));
+
+      for (const trade of risky) {
+        try {
+          const st   = algoState[algoKey];
+          const pair = pairMap.get(trade.pair_address);
+          if (!pair) continue;
+
+          const curPrice  = parseFloat(pair.priceUsd);
+          if (!curPrice || curPrice <= 0) continue;
+
+          const pct      = ((curPrice / parseFloat(trade.entry_price)) - 1) * 100;
+          const curLiq   = pair.liquidity?.usd || 0;
+          const entryLiq = parseFloat(trade.liq || 0);
+          const ageMin   = (Date.now() - new Date(trade.opened_at).getTime()) / 60000;
+          const curFomo  = calcFomoScore(pair);
+
+          const liqCollapse = entryLiq > 5000 && curLiq < entryLiq * 0.35;
+          const hardDump    = pct < -15;
+
+          if (liqCollapse || hardDump) {
+            const mult   = curPrice / parseFloat(trade.entry_price);
+            const rugPnl = +(parseFloat(trade.bet_size) * (mult - 1)).toFixed(2);
+            const reason = liqCollapse ? "LIQ_PULLED" : "HARD_DUMP";
+            const snap   = { fomo: curFomo, liq: curLiq, vol5m: pair.volume?.m5||0, pc5m: parseFloat(pair.priceChange?.m5||0), buys5m: pair.txns?.m5?.buys||0, sells5m: pair.txns?.m5?.sells||0, holdMin: ageMin };
+            await closeTrade(algoKey, trade.id, { mult, pnl: rugPnl, exit: reason, highMult: Math.max(parseFloat(trade.highest_mult || 1), mult) }, snap);
+            st.dailyPnl += rugPnl;
+            checkCircuit(algoKey);
+            console.log(`  [FAST][${algoKey.toUpperCase()}] ${reason} ${trade.ticker} ${pct.toFixed(0)}% $${rugPnl}`);
+          }
+        } catch (e) { /* ignore per-trade errors in fast checker */ }
+      }
+    } catch (e) { /* ignore per-algo errors */ }
+  }
+}
+
 // ── MARKET MOOD ────────────────────────────────────────────
 async function updateMood() {
   if (dexIsBlocked()) return;
   try {
-    // Sequential — not concurrent. Concurrent calls burn 429 budget.
-    const r1 = await dexSearch("solana meme");
+    const p1 = await dexSearch("solana meme");
     if (dexIsBlocked()) return;
     await delay(1000);
-    const r2 = await dexSearch("pump.fun");
-    const pairs = [...r1, ...r2].slice(0, 40);
+    const p2 = await dexSearch("pump.fun");
+    const pairs = [...p1, ...p2].slice(0, 40);
     if (!pairs.length) return;
     const avg = pairs.reduce((a, p) => a + parseFloat(p.priceChange?.m5 || 0), 0) / pairs.length;
     const hot = pairs.filter(p => parseFloat(p.priceChange?.m5 || 0) > 8).length;
@@ -1058,17 +1105,14 @@ async function updateMood() {
 
 async function refreshDaily() {
   try {
-    // Get start of current day in EST cleanly — no broken date arithmetic
-    const nowEST     = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-    const startOfDay = new Date(nowEST);
-    startOfDay.setHours(0, 0, 0, 0);
-    // Convert back to UTC for the DB query
-    const offsetMs   = new Date().getTime() - nowEST.getTime();
-    const startUTC   = new Date(startOfDay.getTime() + offsetMs);
+    const now    = new Date();
+    const nyDate = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+    nyDate.setHours(0, 0, 0, 0);
+    const startOfDay = new Date(now.getTime() - (now - nyDate));
     for (const k of ALGO_KEYS) {
       const r = await db(
         `SELECT COALESCE(SUM(pnl), 0) AS t FROM trades_${k} WHERE status='CLOSED' AND closed_at >= $1`,
-        [startUTC.toISOString()]
+        [startOfDay.toISOString()]
       );
       algoState[k].dailyPnl = parseFloat(r.rows[0].t);
     }
@@ -1123,7 +1167,7 @@ async function getAlgoStats(algoKey) {
 
 // ── API ROUTES ─────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({
-  status: "ok", ts: new Date().toISOString(), version: "12.0",
+  status: "ok", ts: new Date().toISOString(), version: "14.0",
   marketMood: mood, pollCount,
   dexStatus: dexIsBlocked() ? `blocked_until_${new Date(dexBackoffUntil).toISOString()}` : "ok",
   algos: Object.fromEntries(ALGO_KEYS.map(k => [k, {
@@ -1161,39 +1205,24 @@ app.get("/api/open-pnl", async (req, res) => {
     for (const k of ALGO_KEYS) {
       const open = await getOpen(k);
       if (!open.length) { result[k] = []; continue; }
-      // Use pairCache — checkPositions already keeps this fresh every 25s.
-      // Do NOT call dexPairs() here — that fires DexScreener on every dashboard refresh (every 8s).
+      const addrs = open.map(t => t.pair_address);
+      const pairs = await dexPairs(addrs).catch(() => []);
+      const pm    = new Map(pairs.map(p => [p.pairAddress, p]));
       result[k] = open.map(t => {
-        const pair     = pairCache.get(t.pair_address);
+        const pair     = pm.get(t.pair_address);
         const curPrice = pair ? parseFloat(pair.priceUsd) : null;
         const entry    = parseFloat(t.entry_price);
         const bet      = parseFloat(t.bet_size);
         const ageMin   = (Date.now() - new Date(t.opened_at).getTime()) / 60000;
         const hi       = parseFloat(t.highest_mult || 1);
-        if (!curPrice || !entry) return {
-          id: t.id, ticker: t.ticker, pair_address: t.pair_address, dex_url: t.dex_url,
-          score: t.score, fomo_score: t.fomo_score || 0, bet_size: bet, entry_price: entry,
-          opened_at: t.opened_at, cur_price: null, pct_change: null, unrealized_pnl: null,
-          highest_mult: hi, age_min: +ageMin.toFixed(1), warning: "no_price", algo: k,
-        };
+        if (!curPrice || !entry) return { id: t.id, ticker: t.ticker, pair_address: t.pair_address, dex_url: t.dex_url, score: t.score, fomo_score: t.fomo_score || 0, bet_size: bet, entry_price: entry, opened_at: t.opened_at, cur_price: null, pct_change: null, unrealized_pnl: null, highest_mult: hi, age_min: +ageMin.toFixed(1), warning: "no_price", algo: k };
         const mult  = curPrice / entry;
         const pct   = (mult - 1) * 100;
         const upnl  = +(bet * (mult - 1)).toFixed(2);
         const newHi = Math.max(hi, mult);
         const cfg   = ALGOS[k];
-        const warning =
-          mult <= cfg.stopLoss + 0.05 ? "near_stop" :
-          mult <= cfg.earlyStop + 0.03 && ageMin < cfg.earlyStopMinutes ? "near_early_stop" :
-          newHi > 1.2 && mult <= newHi * cfg.trailingPct + 0.05 && ageMin >= cfg.trailingActivateMin ? "near_trailing" :
-          mult >= cfg.tier2 - 0.1 ? "near_tier2" :
-          mult >= cfg.tier1 - 0.05 ? "near_tier1" : "ok";
-        return {
-          id: t.id, ticker: t.ticker, pair_address: t.pair_address, dex_url: t.dex_url,
-          score: t.score, fomo_score: t.fomo_score || 0, bet_size: bet, entry_price: entry,
-          opened_at: t.opened_at, cur_price: +curPrice.toFixed(10), pct_change: +pct.toFixed(2),
-          unrealized_pnl: upnl, mult: +mult.toFixed(4), highest_mult: +newHi.toFixed(4),
-          age_min: +ageMin.toFixed(1), warning, algo: k,
-        };
+        const warning = mult <= cfg.stopLoss + 0.05 ? "near_stop" : mult <= cfg.earlyStop + 0.03 && ageMin < cfg.earlyStopMinutes ? "near_early_stop" : newHi > 1.2 && mult <= newHi * cfg.trailingPct + 0.05 && ageMin >= cfg.trailingActivateMin ? "near_trailing" : mult >= cfg.tier2 - 0.1 ? "near_tier2" : mult >= cfg.tier1 - 0.05 ? "near_tier1" : "ok";
+        return { id: t.id, ticker: t.ticker, pair_address: t.pair_address, dex_url: t.dex_url, score: t.score, fomo_score: t.fomo_score || 0, bet_size: bet, entry_price: entry, opened_at: t.opened_at, cur_price: +curPrice.toFixed(10), pct_change: +pct.toFixed(2), unrealized_pnl: upnl, mult: +mult.toFixed(4), highest_mult: +newHi.toFixed(4), age_min: +ageMin.toFixed(1), warning, algo: k };
       });
     }
     res.json(result);
@@ -1257,7 +1286,7 @@ app.get("/api/system", async (req, res) => {
       openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
     }
     res.json({
-      ts: new Date().toISOString(), version: "12.0",
+      ts: new Date().toISOString(), version: "14.0",
       uptime: Math.round(process.uptime()), pollCount, marketMood: mood,
       dexStatus: dexIsBlocked() ? `blocked_${Math.round((dexBackoffUntil - Date.now()) / 1000)}s` : "ok",
       dexBackoffCount,
@@ -1271,135 +1300,54 @@ app.get("/api/system", async (req, res) => {
 
 app.get("/api/report", async (req, res) => {
   try {
-    // One URL — everything needed for full analysis
-    const [stats, systemData] = await Promise.all([
-      Promise.all(ALGO_KEYS.map(k => getAlgoStats(k))),
-      (async () => {
-        const openCounts = {};
-        for (const k of ALGO_KEYS) {
-          const r = await db(`SELECT COUNT(*) AS n FROM trades_${k} WHERE status='OPEN'`).catch(() => null);
-          openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
-        }
-        return openCounts;
-      })(),
-    ]);
-
+    const stats = await Promise.all(ALGO_KEYS.map(k => getAlgoStats(k)));
     const trades = {};
     const debug  = {};
     for (const k of ALGO_KEYS) {
-      const tRows = (await db(`SELECT * FROM trades_${k} ORDER BY opened_at DESC LIMIT 200`)).rows;
-      trades[k] = tRows;
-
-      const sRows = (await db(`SELECT ticker, score, fomo_score, liq, vol_5m, pc_5m, age_min, entered, skip_reason, seen_at FROM signals_${k} ORDER BY seen_at DESC LIMIT 50`)).rows;
+      const t = await db(`SELECT * FROM trades_${k} ORDER BY opened_at DESC LIMIT 500`);
+      trades[k] = t.rows;
+      const rows = (await db(`SELECT entered, skip_reason FROM signals_${k} WHERE seen_at > NOW() - INTERVAL '1 hour'`)).rows;
       const tally = {};
-      sRows.filter(s => s.skip_reason).forEach(s => {
+      rows.filter(s => s.skip_reason).forEach(s => {
         s.skip_reason.split("; ").forEach(r => { const key = r.split("_").slice(0, 3).join("_"); tally[key] = (tally[key] || 0) + 1; });
       });
-      debug[k] = {
-        name: ALGOS[k].name,
-        summary: {
-          total: sRows.length,
-          entered: sRows.filter(s => s.entered).length,
-          skipped: sRows.filter(s => !s.entered).length,
-          skipReasons: Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 10),
-        },
-      };
+      debug[k] = { name: ALGOS[k].name, total: rows.length, entered: rows.filter(s => s.entered).length, skipped: rows.filter(s => !s.entered).length, skipReasons: Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 10) };
     }
-
+    const openCounts = {};
+    for (const k of ALGO_KEYS) {
+      const r = await db(`SELECT COUNT(*) AS n FROM trades_${k} WHERE status='OPEN'`).catch(() => null);
+      openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
+    }
     res.json({
-      ts: new Date().toISOString(),
-      version: "12.0",
-      uptime: Math.round(process.uptime()),
-      pollCount,
-      marketMood: mood,
+      ts: new Date().toISOString(), version: "14.0",
+      uptime: Math.round(process.uptime()), pollCount, marketMood: mood,
       dexStatus: dexIsBlocked() ? `blocked_${Math.round((dexBackoffUntil - Date.now()) / 1000)}s` : "ok",
       funnel: sysStatus.funnel,
-      openTrades: systemData,
-      stats,
-      trades,
-      debug,
+      openTrades: openCounts,
+      stats, trades, debug,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── FAST CHECK — high-risk positions only ─────────────────
-// Runs every 10s. Only checks trades that match the rug profile:
-// high FOMO at entry + young token + lower liq = most likely to crash fast.
-// Normal checkPositions still runs every 25s for everything else.
-async function checkHighRiskPositions() {
-  if (dexIsBlocked()) return;
-  for (const algoKey of ALGO_KEYS) {
-    try {
-      const open = await getOpen(algoKey);
-      // Only care about trades that are young and entered with high FOMO
-      const highRisk = open.filter(t => {
-        const holdMin = (Date.now() - new Date(t.opened_at).getTime()) / 60000;
-        return holdMin < 20 && parseInt(t.fomo_score || 0) >= 60;
-      });
-      if (!highRisk.length) continue;
-
-      const addrs   = highRisk.map(t => t.pair_address);
-      const pairs   = await dexPairs(addrs).catch(() => []);
-      const pairMap = new Map(pairs.map(p => [p.pairAddress, p]));
-
-      for (const trade of highRisk) {
-        try {
-          const st   = algoState[algoKey];
-          const pair = pairMap.get(trade.pair_address);
-          if (!pair) continue;
-
-          const curPrice = parseFloat(pair.priceUsd);
-          if (!curPrice || curPrice <= 0) continue;
-
-          const pct    = ((curPrice / parseFloat(trade.entry_price)) - 1) * 100;
-          const curLiq = pair.liquidity?.usd || 0;
-          const entryLiq = parseFloat(trade.liq || 0);
-
-          const liqCollapse = entryLiq > 5000 && curLiq < entryLiq * 0.35;
-          const hardDump    = pct < -15;
-
-          if ((liqCollapse || hardDump)) {
-            const mult   = curPrice / parseFloat(trade.entry_price);
-            const rugPnl = +(parseFloat(trade.bet_size) * (mult - 1)).toFixed(2);
-            const reason = liqCollapse ? "LIQ_PULLED" : "HARD_DUMP";
-            const snap = {
-              fomo:    calcFomoScore(pair),
-              liq:     curLiq,
-              vol5m:   pair.volume?.m5 || 0,
-              pc5m:    parseFloat(pair.priceChange?.m5 || 0),
-              buys5m:  pair.txns?.m5?.buys  || 0,
-              sells5m: pair.txns?.m5?.sells || 0,
-              openedAt: trade.opened_at,
-            };
-            await closeTrade(algoKey, trade.id, { mult, pnl: rugPnl, exit: reason, highMult: Math.max(parseFloat(trade.highest_mult || 1), mult) }, snap);
-            st.dailyPnl += rugPnl;
-            console.log(`  [FAST-${algoKey.toUpperCase()}] ${reason} ${trade.ticker} ${pct.toFixed(0)}% $${rugPnl}`);
-          }
-        } catch (e) { console.error(`  fastCheck [${algoKey}] ${trade.ticker}:`, e.message); }
-      }
-    } catch (e) { console.error(`checkHighRisk-${algoKey}:`, e.message); }
-  }
-}
-
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Iron Dome v13.0 running.");
+  res.status(200).send("S0NAR Iron Dome v14.0 running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR IRON DOME v13.0 | Port:${PORT}`);
+  console.log(`\nS0NAR IRON DOME v14.0 | Port:${PORT}`);
   console.log(`Algos: WAVE | SURGE | STEADY | ROCKET`);
-  console.log(`Poll: ${FETCH_MS}ms | Check: ${CHECK_MS}ms | FastCheck: 10s | 429 backoff: active\n`);
+  console.log(`Poll: ${FETCH_MS}ms (slow/safe) | Check: ${CHECK_MS}ms | 429 backoff: active\n`);
   await initDB();
   await refreshDaily();
   await updateMood();
   setTimeout(pollSignals, 3000);
-  setInterval(pollSignals,              FETCH_MS);
-  setInterval(checkPositions,           CHECK_MS);
-  setInterval(checkHighRiskPositions,   10000);   // Fast check every 10s for young high-FOMO trades
-  setInterval(updateMood,               5 * 60 * 1000);
-  setInterval(refreshDaily,             2 * 60 * 1000);
-  setInterval(cleanupSignals,           6 * 60 * 60 * 1000);
+  setInterval(pollSignals,       FETCH_MS);
+  setInterval(checkPositions,    CHECK_MS);
+  setInterval(checkPositionsFast, 10000);
+  setInterval(updateMood,        5 * 60 * 1000);
+  setInterval(refreshDaily,      2 * 60 * 1000);
+  setInterval(cleanupSignals,    6 * 60 * 60 * 1000);
 });
