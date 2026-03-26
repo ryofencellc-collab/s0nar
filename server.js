@@ -1158,8 +1158,13 @@ async function cleanupSignals() {
 
 // ── STATS ──────────────────────────────────────────────────
 async function getAlgoStats(algoKey, dataset = 'v15') {
+  const tsFilter = archiveTimestamp
+    ? (dataset === 'v14'
+        ? `AND opened_at < '${archiveTimestamp}'`
+        : `AND opened_at >= '${archiveTimestamp}'`)
+    : ''; // No archive yet — show everything
   const [closedRes, openRes] = await Promise.all([
-    db(`SELECT pnl, exit_reason, exit_mult, closed_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ORDER BY closed_at ASC`),
+    db(`SELECT pnl, exit_reason, exit_mult, closed_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ${tsFilter} ORDER BY closed_at ASC`),
     db(`SELECT id FROM trades_${algoKey} WHERE status='OPEN'`),
   ]);
   const closed = closedRes.rows;
@@ -1306,31 +1311,43 @@ app.post("/api/wipe", async (req, res) => {
 });
 
 // ── ARCHIVE (v15) ─────────────────────────────────────────────────────────────
-// Tags all current trades as v14 data, resets equity baseline for clean v15 run.
-// Trades are KEPT for comparison — nothing is deleted.
+// Records the archive timestamp. Everything before = v14. Everything after = v15.
+// No column tagging — timestamp is the source of truth.
+let archiveTimestamp = null; // Set when archive is called, persisted in DB
+
+async function loadArchiveTimestamp() {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS sonar_meta (key TEXT PRIMARY KEY, value TEXT)`);
+    const r = await pool.query(`SELECT value FROM sonar_meta WHERE key='archive_ts'`);
+    if (r.rows.length) archiveTimestamp = r.rows[0].value;
+  } catch (e) {}
+}
+
 app.post("/api/archive", async (req, res) => {
   const { password } = req.body;
   if (password !== APP_PASS) return res.status(401).json({ error: "Wrong password" });
   try {
-    // Add version column if not exists (safe migration)
+    const ts = new Date().toISOString();
+    archiveTimestamp = ts;
+    // Persist timestamp so it survives restarts
+    await pool.query(`CREATE TABLE IF NOT EXISTS sonar_meta (key TEXT PRIMARY KEY, value TEXT)`);
+    await pool.query(`INSERT INTO sonar_meta (key, value) VALUES ('archive_ts', $1) ON CONFLICT (key) DO UPDATE SET value=$1`, [ts]);
+    // Reset daily state
     for (const k of ALGO_KEYS) {
-      await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS dataset TEXT DEFAULT NULL`).catch(() => {});
-      // Tag all existing closed trades as v14 (anything closed before now)
-      await db(`UPDATE trades_${k} SET dataset='v14' WHERE status='CLOSED' AND (dataset IS NULL OR dataset='v14')`);
-      // Reset daily state — new baseline starts now
       algoState[k].dailyPnl = 0;
       algoState[k].circuitBroken = false;
       algoState[k].circuitAt = null;
     }
-    // Count archived trades for confirmation
+    // Count v14 trades (everything closed before now)
     const counts = {};
     for (const k of ALGO_KEYS) {
-      const r = await db(`SELECT COUNT(*) AS n FROM trades_${k} WHERE dataset='v14'`);
+      const r = await db(`SELECT COUNT(*) AS n FROM trades_${k} WHERE opened_at < $1`, [ts]);
       counts[k] = parseInt(r.rows[0].n);
     }
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
     res.json({
       ok: true,
+      archiveTimestamp: ts,
       message: `Archived ${total} v14 trades. Equity baseline reset. v15 data collection starts now.`,
       archived: counts,
     });
@@ -1367,7 +1384,12 @@ app.get("/api/report", async (req, res) => {
     const debug  = {};
     for (const k of ALGO_KEYS) {
       // Filter by dataset if column exists, otherwise return all
-      const t = await db(`SELECT * FROM trades_${k} ORDER BY opened_at DESC LIMIT 500`);
+      const tsFilter = archiveTimestamp
+        ? (dataset === 'v14'
+            ? `WHERE opened_at < '${archiveTimestamp}'`
+            : `WHERE opened_at >= '${archiveTimestamp}'`)
+        : '';
+      const t = await db(`SELECT * FROM trades_${k} ${tsFilter} ORDER BY opened_at DESC LIMIT 500`);
       trades[k] = t.rows;
       const rows = (await db(`SELECT entered, skip_reason FROM signals_${k} WHERE seen_at > NOW() - INTERVAL '1 hour'`)).rows;
       const tally = {};
@@ -1404,6 +1426,7 @@ app.listen(PORT, async () => {
   console.log(`Algos: WAVE | SURGE | STEADY | ROCKET`);
   console.log(`Poll: ${FETCH_MS}ms (slow/safe) | Check: ${CHECK_MS}ms | 429 backoff: active\n`);
   await initDB();
+  await loadArchiveTimestamp();
   await refreshDaily();
   await updateMood();
   setTimeout(pollSignals, 3000);
