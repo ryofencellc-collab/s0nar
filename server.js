@@ -1158,13 +1158,8 @@ async function cleanupSignals() {
 
 // ── STATS ──────────────────────────────────────────────────
 async function getAlgoStats(algoKey, dataset = 'v15') {
-  const dsFilter = dataset === 'all'
-    ? ''
-    : dataset === 'v14'
-      ? `AND (dataset = 'v14')`
-      : `AND (dataset IS NULL OR dataset = 'v15')`; // v15 = new trades after archive
   const [closedRes, openRes] = await Promise.all([
-    db(`SELECT pnl, exit_reason, exit_mult, closed_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ${dsFilter} ORDER BY closed_at ASC`),
+    db(`SELECT pnl, exit_reason, exit_mult, closed_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ORDER BY closed_at ASC`),
     db(`SELECT id FROM trades_${algoKey} WHERE status='OPEN'`),
   ]);
   const closed = closedRes.rows;
@@ -1372,12 +1367,7 @@ app.get("/api/report", async (req, res) => {
     const debug  = {};
     for (const k of ALGO_KEYS) {
       // Filter by dataset if column exists, otherwise return all
-      const dsFilter = dataset === 'all'
-        ? ''
-        : dataset === 'v14'
-          ? `WHERE (dataset = 'v14')`
-          : `WHERE (dataset IS NULL OR dataset = 'v15')`;
-      const t = await db(`SELECT * FROM trades_${k} ${dsFilter} ORDER BY opened_at DESC LIMIT 500`);
+      const t = await db(`SELECT * FROM trades_${k} ORDER BY opened_at DESC LIMIT 500`);
       trades[k] = t.rows;
       const rows = (await db(`SELECT entered, skip_reason FROM signals_${k} WHERE seen_at > NOW() - INTERVAL '1 hour'`)).rows;
       const tally = {};
