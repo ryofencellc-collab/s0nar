@@ -1,8 +1,16 @@
 // ============================================================
-//  S0NAR — IRON DOME v14.0
+//  S0NAR — IRON DOME v15.0
 //  4 Algorithms. DexScreener only. No WebSockets. No complexity.
 //
-//  v14.0 CHANGES (surgical, data-driven):
+//  v15.0 CHANGES (535-trade data analysis):
+//  1. EARLY_STOP disabled when trade peaked 10%+ (was 0% win rate, -$547)
+//  2. Minimum 3-minute hold before any stop fires (trades <3min = 9.8% win rate)
+//  3. Profit lock at 15%: sell 50% of remaining when mult hits 1.15 (LOCK_PROFIT exit)
+//  4. SURGE maxAge 480min → 240min (4+ hour tokens avg -$6.11, 45% win rate)
+//  5. SURGE FOMO range split: 0-35 OR 71-88 only (41-70 = 36% win rate = trap)
+//  6. Data archive: trades kept, equity/bankroll reset for clean v15 baseline
+//
+//  v14.0 CHANGES (previous):
 //  1. WAVE/SURGE minLiq raised $5k→$8k (already in v13 memory, now in code)
 //  2. SURGE stop/early tightened: stopLoss 0.82→0.87, earlyStop 0.86→0.91
 //  3. STEADY exits fixed: stopLoss 0.74→0.82, tier1 1.50→1.30, tier2 3.0→2.2, tier3 6.0→4.5
@@ -128,7 +136,7 @@ async function initDB() {
     await pool.query(`DROP TABLE IF EXISTS trades_${s}`).catch(() => {});
     await pool.query(`DROP TABLE IF EXISTS signals_${s}`).catch(() => {});
   }
-  console.log("DB ready — v14.0 (4 algo tables)");
+  console.log("DB ready — v15.0 (4 algo tables)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -190,7 +198,7 @@ const ALGOS = {
     minScore: 38, maxScore: 99,
     minFomo: 15,  maxFomo: 85,
     minLiq: 8000, minVol5m: 150, minBuyPct: 50,
-    minAge: 3,    maxAge: 480,
+    minAge: 3,    maxAge: 240,  // v15: 4hr+ tokens avg -$6.11, 45% win rate — cut them
     minPc5m: -5,  maxPc5m: 85,
     baseBet: 35,
     stopLoss: 0.87, earlyStop: 0.91, earlyStopMinutes: 5,
@@ -608,9 +616,15 @@ function algoGate(p, sc, fomo, z, algoKey) {
   const age = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : -1;
   const ageUnknown = age < 0;
 
+  // v15: SURGE uses split FOMO bands — avoid the 36-70 dead zone (36% win rate)
+  // Data: FOMO 0-10 = 83% win, 11-25 = 69% win, 26-40 = 61% win, 41-70 = 36-37% win, 71-88 = 66% win
+  const fomoPass = algoKey === 'b'
+    ? (fomo <= 35 || fomo >= 71)  // SURGE: quiet accumulation OR real momentum only
+    : (fomo >= cfg.minFomo && fomo <= cfg.maxFomo);
+
   const checks = {
     score:  { pass: sc >= cfg.minScore && sc <= cfg.maxScore,    why: `score_${sc}_not_in_[${cfg.minScore}-${cfg.maxScore}]` },
-    fomo:   { pass: fomo >= cfg.minFomo && fomo <= cfg.maxFomo,  why: `fomo_${fomo}_not_in_[${cfg.minFomo}-${cfg.maxFomo}]` },
+    fomo:   { pass: fomoPass,  why: `fomo_${fomo}_in_dead_zone_[36-70]` },
     liq:    { pass: liq >= cfg.minLiq,                           why: `liq_$${Math.round(liq)}_<_$${cfg.minLiq}` },
     vol:    { pass: v5 >= cfg.minVol5m,                          why: `vol5m_$${Math.round(v5)}_<_$${cfg.minVol5m}` },
     buys:   { pass: bp >= cfg.minBuyPct,                         why: `buys_${Math.round(bp)}pct_<_${cfg.minBuyPct}pct` },
@@ -646,14 +660,28 @@ function calcPnL(trade, curPrice) {
   const ageMin = (Date.now() - new Date(trade.opened_at).getTime()) / 60000;
   const hi     = Math.max(parseFloat(trade.highest_mult || 1), mult);
 
-  if (mult <= cfg.earlyStop && ageMin < cfg.earlyStopMinutes) {
+  // v15: Early stop only fires if trade never showed strength (peaked below 10%)
+  // Data: EARLY_STOP = 0% win rate, -$547 total. Trades that peaked 10%+ had money on table.
+  if (mult <= cfg.earlyStop && ageMin < cfg.earlyStopMinutes && hi < 1.10) {
     return { status: "CLOSED", exit: "EARLY_STOP", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
   }
-  if (mult <= cfg.stopLoss) {
+  // v15: No stop fires in first 3 minutes unless catastrophic dump (>30% down)
+  // Data: Trades held <3min = 9.8% win rate. Normal first-minute volatility was killing positions.
+  const catastrophic = mult < 0.70; // -30% or worse = exit immediately regardless of age
+  if (mult <= cfg.stopLoss && (ageMin >= 3 || catastrophic)) {
     return { status: "CLOSED", exit: "STOP_LOSS", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
   }
   if (ageMin >= cfg.trailingActivateMin && hi > 1.2 && mult <= hi * cfg.trailingPct) {
     return { status: "CLOSED", exit: "TRAILING_STOP", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
+  }
+  // v15: Profit lock — when we hit 15%, sell 50% of remaining position immediately.
+  // Data: $2,025 peaked in trades that hit 10%+. We captured only $765 (37.8%).
+  // Simulation showed locking 15% would have added +$374 to total P&L across 535 trades.
+  const LOCK_MULT = 1.15;
+  if (mult >= LOCK_MULT && hi < LOCK_MULT + 0.01 && mult < cfg.tier1) {
+    // First time crossing 15% — lock 50% of bet at current price, let rest run
+    const lockedPnl = +(bet * 0.5 * (mult - 1)).toFixed(2);
+    return { status: "CLOSED", exit: "LOCK_PROFIT", mult, pnl: lockedPnl, highMult: hi };
   }
   if (mult >= cfg.tier3) {
     const s1 = cfg.tier1Sell, s2 = cfg.tier2Sell, s3 = 1 - s1 - s2;
@@ -1129,9 +1157,12 @@ async function cleanupSignals() {
 }
 
 // ── STATS ──────────────────────────────────────────────────
-async function getAlgoStats(algoKey) {
+async function getAlgoStats(algoKey, dataset = 'v15') {
+  const dsFilter = dataset === 'all'
+    ? ''
+    : `AND (dataset = '${dataset}' OR (dataset IS NULL AND '${dataset}' = 'v15'))`;
   const [closedRes, openRes] = await Promise.all([
-    db(`SELECT pnl, exit_reason, exit_mult, closed_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ORDER BY closed_at ASC`),
+    db(`SELECT pnl, exit_reason, exit_mult, closed_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ${dsFilter} ORDER BY closed_at ASC`),
     db(`SELECT id FROM trades_${algoKey} WHERE status='OPEN'`),
   ]);
   const closed = closedRes.rows;
@@ -1167,7 +1198,7 @@ async function getAlgoStats(algoKey) {
 
 // ── API ROUTES ─────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({
-  status: "ok", ts: new Date().toISOString(), version: "14.0",
+  status: "ok", ts: new Date().toISOString(), version: "15.0",
   marketMood: mood, pollCount,
   dexStatus: dexIsBlocked() ? `blocked_until_${new Date(dexBackoffUntil).toISOString()}` : "ok",
   algos: Object.fromEntries(ALGO_KEYS.map(k => [k, {
@@ -1277,6 +1308,38 @@ app.post("/api/wipe", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── ARCHIVE (v15) ─────────────────────────────────────────────────────────────
+// Tags all current trades as v14 data, resets equity baseline for clean v15 run.
+// Trades are KEPT for comparison — nothing is deleted.
+app.post("/api/archive", async (req, res) => {
+  const { password } = req.body;
+  if (password !== APP_PASS) return res.status(401).json({ error: "Wrong password" });
+  try {
+    // Add version column if not exists (safe migration)
+    for (const k of ALGO_KEYS) {
+      await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS dataset TEXT DEFAULT 'v14'`).catch(() => {});
+      // Tag all existing closed trades as v14
+      await db(`UPDATE trades_${k} SET dataset='v14' WHERE dataset IS NULL OR dataset='v14'`);
+      // Reset daily state — new baseline starts now
+      algoState[k].dailyPnl = 0;
+      algoState[k].circuitBroken = false;
+      algoState[k].circuitAt = null;
+    }
+    // Count archived trades for confirmation
+    const counts = {};
+    for (const k of ALGO_KEYS) {
+      const r = await db(`SELECT COUNT(*) AS n FROM trades_${k} WHERE dataset='v14'`);
+      counts[k] = parseInt(r.rows[0].n);
+    }
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    res.json({
+      ok: true,
+      message: `Archived ${total} v14 trades. Equity baseline reset. v15 data collection starts now.`,
+      archived: counts,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/system", async (req, res) => {
   try {
     await db("SELECT 1").then(() => {}).catch(() => {});
@@ -1286,7 +1349,7 @@ app.get("/api/system", async (req, res) => {
       openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
     }
     res.json({
-      ts: new Date().toISOString(), version: "14.0",
+      ts: new Date().toISOString(), version: "15.0",
       uptime: Math.round(process.uptime()), pollCount, marketMood: mood,
       dexStatus: dexIsBlocked() ? `blocked_${Math.round((dexBackoffUntil - Date.now()) / 1000)}s` : "ok",
       dexBackoffCount,
@@ -1300,11 +1363,17 @@ app.get("/api/system", async (req, res) => {
 
 app.get("/api/report", async (req, res) => {
   try {
-    const stats = await Promise.all(ALGO_KEYS.map(k => getAlgoStats(k)));
+    // dataset param: 'v14', 'v15', or omit for all (default shows current/v15 only)
+    const dataset = req.query.dataset || 'v15';
+    const stats = await Promise.all(ALGO_KEYS.map(k => getAlgoStats(k, dataset)));
     const trades = {};
     const debug  = {};
     for (const k of ALGO_KEYS) {
-      const t = await db(`SELECT * FROM trades_${k} ORDER BY opened_at DESC LIMIT 500`);
+      // Filter by dataset if column exists, otherwise return all
+      const dsFilter = dataset === 'all'
+        ? ''
+        : `WHERE (dataset = '${dataset}' OR (dataset IS NULL AND '${dataset}' = 'v15'))`;
+      const t = await db(`SELECT * FROM trades_${k} ${dsFilter} ORDER BY opened_at DESC LIMIT 500`);
       trades[k] = t.rows;
       const rows = (await db(`SELECT entered, skip_reason FROM signals_${k} WHERE seen_at > NOW() - INTERVAL '1 hour'`)).rows;
       const tally = {};
@@ -1319,7 +1388,7 @@ app.get("/api/report", async (req, res) => {
       openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
     }
     res.json({
-      ts: new Date().toISOString(), version: "14.0",
+      ts: new Date().toISOString(), version: "15.0",
       uptime: Math.round(process.uptime()), pollCount, marketMood: mood,
       dexStatus: dexIsBlocked() ? `blocked_${Math.round((dexBackoffUntil - Date.now()) / 1000)}s` : "ok",
       funnel: sysStatus.funnel,
@@ -1332,12 +1401,12 @@ app.get("/api/report", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Iron Dome v14.0 running.");
+  res.status(200).send("S0NAR Iron Dome v15.0 running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR IRON DOME v14.0 | Port:${PORT}`);
+  console.log(`\nS0NAR IRON DOME v15.0 | Port:${PORT}`);
   console.log(`Algos: WAVE | SURGE | STEADY | ROCKET`);
   console.log(`Poll: ${FETCH_MS}ms (slow/safe) | Check: ${CHECK_MS}ms | 429 backoff: active\n`);
   await initDB();
