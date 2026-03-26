@@ -1160,7 +1160,9 @@ async function cleanupSignals() {
 async function getAlgoStats(algoKey, dataset = 'v15') {
   const dsFilter = dataset === 'all'
     ? ''
-    : `AND (dataset = '${dataset}' OR (dataset IS NULL AND '${dataset}' = 'v15'))`;
+    : dataset === 'v14'
+      ? `AND (dataset = 'v14')`
+      : `AND (dataset IS NULL OR dataset = 'v15')`; // v15 = new trades after archive
   const [closedRes, openRes] = await Promise.all([
     db(`SELECT pnl, exit_reason, exit_mult, closed_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ${dsFilter} ORDER BY closed_at ASC`),
     db(`SELECT id FROM trades_${algoKey} WHERE status='OPEN'`),
@@ -1317,9 +1319,9 @@ app.post("/api/archive", async (req, res) => {
   try {
     // Add version column if not exists (safe migration)
     for (const k of ALGO_KEYS) {
-      await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS dataset TEXT DEFAULT 'v14'`).catch(() => {});
-      // Tag all existing closed trades as v14
-      await db(`UPDATE trades_${k} SET dataset='v14' WHERE dataset IS NULL OR dataset='v14'`);
+      await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS dataset TEXT DEFAULT NULL`).catch(() => {});
+      // Tag all existing closed trades as v14 (anything closed before now)
+      await db(`UPDATE trades_${k} SET dataset='v14' WHERE status='CLOSED' AND (dataset IS NULL OR dataset='v14')`);
       // Reset daily state — new baseline starts now
       algoState[k].dailyPnl = 0;
       algoState[k].circuitBroken = false;
@@ -1372,7 +1374,9 @@ app.get("/api/report", async (req, res) => {
       // Filter by dataset if column exists, otherwise return all
       const dsFilter = dataset === 'all'
         ? ''
-        : `WHERE (dataset = '${dataset}' OR (dataset IS NULL AND '${dataset}' = 'v15'))`;
+        : dataset === 'v14'
+          ? `WHERE (dataset = 'v14')`
+          : `WHERE (dataset IS NULL OR dataset = 'v15')`;
       const t = await db(`SELECT * FROM trades_${k} ${dsFilter} ORDER BY opened_at DESC LIMIT 500`);
       trades[k] = t.rows;
       const rows = (await db(`SELECT entered, skip_reason FROM signals_${k} WHERE seen_at > NOW() - INTERVAL '1 hour'`)).rows;
