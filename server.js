@@ -1,8 +1,17 @@
 // ============================================================
-//  S0NAR — IRON DOME v15.0
+//  S0NAR — IRON DOME v16.0
 //  4 Algorithms. DexScreener only. No WebSockets. No complexity.
 //
-//  v15.0 CHANGES (535-trade data analysis):
+//  v16.0 CHANGES — ADAPTIVE ALGOS (4 stable vs 4 adaptive head-to-head):
+//  ALGO E — WAVE-ADAPT:   Same as WAVE but dynamic FOMO bands based on market mood
+//  ALGO F — SURGE-ADAPT:  Same as SURGE but pure Z-score entry (no FOMO filter)
+//  ALGO G — STEADY-ADAPT: Same as STEADY but time-of-day weighted bets + entry
+//  ALGO H — ROCKET-ADAPT: Same as ROCKET but rolling win-rate feedback loop on risk
+//
+//  Stable algos (a,b,c,d) UNTOUCHED. Adaptive (e,f,g,h) compete head-to-head.
+//  After 4 weeks data decides which logic wins. No emotions, just data.
+//
+//  v15.0 CHANGES (previous):
 //  1. EARLY_STOP disabled when trade peaked 10%+ (was 0% win rate, -$547)
 //  2. Minimum 3-minute hold before any stop fires (trades <3min = 9.8% win rate)
 //  3. Profit lock at 15%: sell 50% of remaining when mult hits 1.15 (LOCK_PROFIT exit)
@@ -19,7 +28,7 @@
 //  6. hadTrade: name-match cooldown removed, ticker-only 30min (less blocking)
 //
 //  ALGO A — WAVE:    10-180min, FOMO 10-80, broad momentum entry
-//  ALGO B — SURGE:   3-480min,  FOMO 15-85, volume spike focus
+//  ALGO B — SURGE:   3-240min, FOMO 0-35 OR 71-88 (split bands, dead zone avoided)
 //  ALGO C — STEADY:  10-300min, FOMO 0-60,  quiet accumulation
 //  ALGO D — ROCKET:  3-150min,  FOMO 15-88, fast in fast out
 // ============================================================
@@ -80,6 +89,8 @@ const TRADE_COLS = `
   is_stealth BOOLEAN DEFAULT FALSE,
   rug_score INTEGER DEFAULT 0,
   algo TEXT,
+  algo_version TEXT DEFAULT 'v16',
+  algo_type TEXT DEFAULT 'stable',
   opened_at TIMESTAMPTZ DEFAULT NOW(),
   closed_at TIMESTAMPTZ,
   exit_fomo INTEGER DEFAULT 0,
@@ -105,7 +116,7 @@ const SIGNAL_COLS = `
   seen_at TIMESTAMPTZ DEFAULT NOW()
 `;
 
-const ALGO_KEYS = ["a", "b", "c", "d"];
+const ALGO_KEYS = ["a", "b", "c", "d", "e", "f", "g", "h"];
 
 async function initDB() {
   for (const k of ALGO_KEYS) {
@@ -117,6 +128,10 @@ async function initDB() {
     await db(`CREATE INDEX IF NOT EXISTS idx_sig_${k}_seen  ON signals_${k}(seen_at DESC)`);
     // Safe migrations
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS rug_score INTEGER DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS algo_version TEXT DEFAULT 'v15'`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS algo_type TEXT DEFAULT 'stable'`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS dataset TEXT DEFAULT NULL`).catch(() => {});
+    // Note: existing rows correctly get 'v15' default. New v16 trades write 'v16' explicitly in insertTrade.
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_fomo INTEGER DEFAULT 0`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_liq NUMERIC DEFAULT 0`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_vol_5m NUMERIC DEFAULT 0`).catch(() => {});
@@ -131,12 +146,12 @@ async function initDB() {
     "c1","c2","c3","c4","c5","c6","c7","c8","c9","c10",
     "d1","d2","d3","d4","d5","d6","d7","d8","d9","d10",
     "e1","e2","e3","e4","e5","e6","e7","e8","e9","e10",
-    "wave","surge","steady","rocket","e"];
+    "wave","surge","steady","rocket"]; // NOTE: "e" removed — it is trades_e (WAVE-ADAPT live table)
   for (const s of oldSlots) {
     await pool.query(`DROP TABLE IF EXISTS trades_${s}`).catch(() => {});
     await pool.query(`DROP TABLE IF EXISTS signals_${s}`).catch(() => {});
   }
-  console.log("DB ready — v15.0 (4 algo tables)");
+  console.log("DB ready — v16.0 (8 algo tables: a,b,c,d stable | e,f,g,h adaptive)");
 }
 
 // ── AUTH ───────────────────────────────────────────────────
@@ -239,6 +254,77 @@ const ALGOS = {
     tier2: 1.60, tier2Sell: 0.20,
     tier3: 2.50, maxHold: 25,
   },
+  // ── ADAPTIVE ALGOS ─────────────────────────────────────
+  // These mirror the stable four but with adaptive logic.
+  // Parameters start identical — adaptation happens at runtime.
+  e: {
+    name: "WAVE-ADAPT",
+    desc: "WAVE with dynamic FOMO bands — tightens in hot markets, loosens in quiet ones.",
+    color: "#00bcd4",
+    minScore: 38, maxScore: 99,
+    minFomo: 10,  maxFomo: 80,  // Base bands — runtime adjusts these dynamically
+    minLiq: 8000, minVol5m: 150, minBuyPct: 50,
+    minAge: 10,   maxAge: 180,
+    minPc5m: -5,  maxPc5m: 80,
+    baseBet: 50,
+    stopLoss: 0.84, earlyStop: 0.88, earlyStopMinutes: 5,
+    trailingPct: 0.85, trailingActivateMin: 20,
+    tier1: 1.35, tier1Sell: 0.60,
+    tier2: 1.80, tier2Sell: 0.30,
+    tier3: 3.00, maxHold: 45,
+    adaptive: true, adaptType: "dynamic_fomo",
+  },
+  f: {
+    name: "SURGE-ADAPT",
+    desc: "SURGE with pure volume Z-score entry — no FOMO filter, anomaly volume only.",
+    color: "#ff9800",
+    minScore: 38, maxScore: 99,
+    minFomo: 0,   maxFomo: 99,  // FOMO ignored — Z-score is the signal
+    minLiq: 8000, minVol5m: 150, minBuyPct: 50,
+    minAge: 3,    maxAge: 240,
+    minPc5m: -5,  maxPc5m: 85,
+    baseBet: 35,
+    stopLoss: 0.87, earlyStop: 0.91, earlyStopMinutes: 5,
+    trailingPct: 0.84, trailingActivateMin: 15,
+    tier1: 1.30, tier1Sell: 0.65,
+    tier2: 1.70, tier2Sell: 0.25,
+    tier3: 2.50, maxHold: 30,
+    adaptive: true, adaptType: "z_score_only", minZScore: 2.5,
+  },
+  g: {
+    name: "STEADY-ADAPT",
+    desc: "STEADY with time-of-day weighting — aggressive in peak hours, conservative off-peak.",
+    color: "#4caf50",
+    minScore: 38, maxScore: 88,
+    minFomo: 0,   maxFomo: 60,
+    minLiq: 8000, minVol5m: 100, minBuyPct: 48,
+    minAge: 10,   maxAge: 300,
+    minPc5m: -10, maxPc5m: 30,
+    baseBet: 55,
+    stopLoss: 0.82, earlyStop: 0.87, earlyStopMinutes: 10,
+    trailingPct: 0.84, trailingActivateMin: 30,
+    tier1: 1.30, tier1Sell: 0.40,
+    tier2: 2.20, tier2Sell: 0.35,
+    tier3: 4.50, maxHold: 120,
+    adaptive: true, adaptType: "time_of_day",
+  },
+  h: {
+    name: "ROCKET-ADAPT",
+    desc: "ROCKET with rolling win-rate feedback — presses hot streaks, retreats on cold.",
+    color: "#e91e63",
+    minScore: 38, maxScore: 99,
+    minFomo: 15,  maxFomo: 88,
+    minLiq: 5000, minVol5m: 150, minBuyPct: 50,
+    minAge: 3,    maxAge: 150,
+    minPc5m: -5,  maxPc5m: 100,
+    baseBet: 35,
+    stopLoss: 0.80, earlyStop: 0.85, earlyStopMinutes: 3,
+    trailingPct: 0.83, trailingActivateMin: 10,
+    tier1: 1.25, tier1Sell: 0.70,
+    tier2: 1.60, tier2Sell: 0.20,
+    tier3: 2.50, maxHold: 25,
+    adaptive: true, adaptType: "win_rate_feedback",
+  },
 };
 
 const DAILY_LIMIT = 200; // Circuit break per algo per day
@@ -261,6 +347,10 @@ const algoState = {
   b: { dailyPnl: 0, circuitBroken: false, circuitAt: null },
   c: { dailyPnl: 0, circuitBroken: false, circuitAt: null },
   d: { dailyPnl: 0, circuitBroken: false, circuitAt: null },
+  e: { dailyPnl: 0, circuitBroken: false, circuitAt: null },
+  f: { dailyPnl: 0, circuitBroken: false, circuitAt: null },
+  g: { dailyPnl: 0, circuitBroken: false, circuitAt: null },
+  h: { dailyPnl: 0, circuitBroken: false, circuitAt: null, recentWins: 0, recentLosses: 0, lastTenPnl: [] },
 };
 
 class LRUMap {
@@ -300,6 +390,10 @@ const sysStatus = {
     b: { seen: 0, gate: 0, rugPass: 0, entered: 0 },
     c: { seen: 0, gate: 0, rugPass: 0, entered: 0 },
     d: { seen: 0, gate: 0, rugPass: 0, entered: 0 },
+    e: { seen: 0, gate: 0, rugPass: 0, entered: 0 },
+    f: { seen: 0, gate: 0, rugPass: 0, entered: 0 },
+    g: { seen: 0, gate: 0, rugPass: 0, entered: 0 },
+    h: { seen: 0, gate: 0, rugPass: 0, entered: 0 },
   },
 };
 
@@ -605,6 +699,77 @@ function rugCheck(p) {
   return { pass: w.length === 0, warnings: w };
 }
 
+// ── ADAPTIVE ENGINE ────────────────────────────────────────
+// Rolling market FOMO average — computed across all tokens seen in last poll
+// Used by WAVE-ADAPT to dynamically shift its FOMO entry band
+let marketAvgFomo = 40; // Updated each poll cycle
+let marketFomoSamples = [];
+
+function updateMarketFomo(fomoValues) {
+  marketFomoSamples = [...marketFomoSamples, ...fomoValues].slice(-200); // Keep last 200 samples
+  if (marketFomoSamples.length > 0) {
+    marketAvgFomo = Math.round(marketFomoSamples.reduce((a, b) => a + b, 0) / marketFomoSamples.length);
+  }
+}
+
+// WAVE-ADAPT: Dynamic FOMO bands based on current market temperature
+// Hot market (avg FOMO > 55): require higher FOMO to enter — market is crowded
+// Cold market (avg FOMO < 30): accept lower FOMO — quiet accumulation opportunity
+function getDynamicFomoBand(baseCfg) {
+  if (marketAvgFomo > 55) {
+    // Hot market — tighten to only the strongest momentum signals
+    return { minFomo: baseCfg.minFomo + 15, maxFomo: baseCfg.maxFomo };
+  } else if (marketAvgFomo < 30) {
+    // Cold market — loosen to catch early movers before crowd arrives
+    return { minFomo: Math.max(0, baseCfg.minFomo - 10), maxFomo: baseCfg.maxFomo };
+  }
+  // Normal market — use base config
+  return { minFomo: baseCfg.minFomo, maxFomo: baseCfg.maxFomo };
+}
+
+// STEADY-ADAPT: Time-of-day weighting
+// Peak: Thu-Sun 6pm-midnight EST = more aggressive
+// Dead: Daily 2am-10am EST = conservative, smaller bets
+function getTimeOfDayMultiplier() {
+  const now = new Date();
+  const estHour = (now.getUTCHours() - 5 + 24) % 24; // EST offset
+  const dayOfWeek = now.getUTCDay(); // 0=Sun, 1=Mon, ... 4=Thu, 5=Fri, 6=Sat
+
+  const isPeakDay  = dayOfWeek >= 4 || dayOfWeek === 0; // Thu-Sun
+  const isPeakHour = estHour >= 18 || estHour === 0;    // 6pm-midnight (midnight = hour 0)
+  const isDeadHour = estHour >= 2 && estHour < 10;      // 2am-10am
+
+  if (isDeadHour) return 0.6;       // Conservative: 60% of base bet
+  if (isPeakDay && isPeakHour) return 1.3; // Aggressive: 130% of base bet
+  return 1.0;                        // Normal: base bet
+}
+
+// ROCKET-ADAPT: Rolling win-rate feedback over last 10 closed trades
+// Win rate > 70%: press the streak — bigger bets, slightly wider stops
+// Win rate < 40%: retreat — smaller bets, tighter stops
+function getRocketAdaptParams() {
+  const st = algoState['h'];
+  const last10 = st.lastTenPnl || [];
+  if (last10.length < 3) return { betMult: 1.0, stopAdj: 0 }; // Need data first
+
+  const wins = last10.filter(p => p > 0).length;
+  const winRate = wins / last10.length;
+
+  if (winRate >= 0.70) {
+    return { betMult: 1.3, stopAdj: -0.01 }; // Hot streak: bigger bets, slightly wider stop
+  } else if (winRate <= 0.40) {
+    return { betMult: 0.6, stopAdj: 0.02 };  // Cold streak: smaller bets, tighter stop
+  }
+  return { betMult: 1.0, stopAdj: 0 }; // Normal
+}
+
+function updateRocketAdaptState(pnl) {
+  const st = algoState['h'];
+  if (!st.lastTenPnl) st.lastTenPnl = [];
+  st.lastTenPnl.push(pnl);
+  if (st.lastTenPnl.length > 10) st.lastTenPnl.shift();
+}
+
 function algoGate(p, sc, fomo, z, algoKey) {
   const cfg = ALGOS[algoKey];
   const liq = p.liquidity?.usd || 0;
@@ -616,15 +781,39 @@ function algoGate(p, sc, fomo, z, algoKey) {
   const age = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : -1;
   const ageUnknown = age < 0;
 
-  // v15: SURGE uses split FOMO bands — avoid the 36-70 dead zone (36% win rate)
-  // Data: FOMO 0-10 = 83% win, 11-25 = 69% win, 26-40 = 61% win, 41-70 = 36-37% win, 71-88 = 66% win
-  const fomoPass = algoKey === 'b'
-    ? (fomo <= 35 || fomo >= 71)  // SURGE: quiet accumulation OR real momentum only
-    : (fomo >= cfg.minFomo && fomo <= cfg.maxFomo);
+  // Adaptive FOMO logic per algo
+  let fomoPass;
+  if (algoKey === 'b') {
+    // SURGE: split FOMO bands — avoid dead zone 36-70
+    fomoPass = (fomo <= 35 || fomo >= 71);
+  } else if (algoKey === 'e') {
+    // WAVE-ADAPT: dynamic bands based on market temperature
+    const dynBand = getDynamicFomoBand(cfg);
+    fomoPass = (fomo >= dynBand.minFomo && fomo <= dynBand.maxFomo);
+  } else if (algoKey === 'f') {
+    // SURGE-ADAPT: Z-score only — FOMO doesn't matter, volume anomaly is the signal
+    fomoPass = z >= (cfg.minZScore || 2.5);
+  } else if (algoKey === 'g') {
+    // STEADY-ADAPT: same FOMO bands as STEADY but time multiplier affects bet sizing (not entry)
+    fomoPass = (fomo >= cfg.minFomo && fomo <= cfg.maxFomo);
+  } else if (algoKey === 'h') {
+    // ROCKET-ADAPT: same FOMO bands as ROCKET but stop/bet adjusted by win-rate feedback
+    fomoPass = (fomo >= cfg.minFomo && fomo <= cfg.maxFomo);
+  } else {
+    fomoPass = (fomo >= cfg.minFomo && fomo <= cfg.maxFomo);
+  }
+
+  const fomoWhyMsg = algoKey === 'b'
+    ? `fomo_${fomo}_in_dead_zone_[36-70]`
+    : algoKey === 'f'
+    ? `z_score_${z.toFixed(2)}_below_2.5`
+    : algoKey === 'e'
+    ? `fomo_${fomo}_outside_dynamic_band`
+    : `fomo_${fomo}_outside_[${cfg.minFomo}-${cfg.maxFomo}]`;
 
   const checks = {
     score:  { pass: sc >= cfg.minScore && sc <= cfg.maxScore,    why: `score_${sc}_not_in_[${cfg.minScore}-${cfg.maxScore}]` },
-    fomo:   { pass: fomoPass,  why: `fomo_${fomo}_in_dead_zone_[36-70]` },
+    fomo:   { pass: fomoPass,  why: fomoWhyMsg },
     liq:    { pass: liq >= cfg.minLiq,                           why: `liq_$${Math.round(liq)}_<_$${cfg.minLiq}` },
     vol:    { pass: v5 >= cfg.minVol5m,                          why: `vol5m_$${Math.round(v5)}_<_$${cfg.minVol5m}` },
     buys:   { pass: bp >= cfg.minBuyPct,                         why: `buys_${Math.round(bp)}pct_<_${cfg.minBuyPct}pct` },
@@ -647,8 +836,18 @@ function betSize(sc, algoKey, liq, ageMin = 999) {
   const mult  = 0.8 + pct * 0.4;
   const liqCap = liq > 0 ? Math.max(10, liq * 0.001) : 150;
   const raw  = Math.min(liqCap, Math.min(150, Math.max(15, Math.round((base * mult) / 5) * 5)));
-  // Young token bet cap: WAVE and SURGE cap at $25 for tokens under 30 minutes old
-  if ((algoKey === "a" || algoKey === "b") && ageMin < 30) return Math.min(raw, 25);
+  // Young token bet cap: WAVE, SURGE and their adaptive mirrors cap at $25 under 30min
+  if ((algoKey === "a" || algoKey === "b" || algoKey === "e" || algoKey === "f") && ageMin < 30) return Math.min(raw, 25);
+  // STEADY-ADAPT: time-of-day multiplier on bet size
+  if (algoKey === "g") {
+    const timeMult = getTimeOfDayMultiplier();
+    return Math.min(liqCap, Math.min(150, Math.max(15, Math.round((raw * timeMult) / 5) * 5)));
+  }
+  // ROCKET-ADAPT: win-rate feedback multiplier on bet size
+  if (algoKey === "h") {
+    const { betMult } = getRocketAdaptParams();
+    return Math.min(liqCap, Math.min(150, Math.max(15, Math.round((raw * betMult) / 5) * 5)));
+  }
   return raw;
 }
 
@@ -668,7 +867,11 @@ function calcPnL(trade, curPrice) {
   // v15: No stop fires in first 3 minutes unless catastrophic dump (>30% down)
   // Data: Trades held <3min = 9.8% win rate. Normal first-minute volatility was killing positions.
   const catastrophic = mult < 0.70; // -30% or worse = exit immediately regardless of age
-  if (mult <= cfg.stopLoss && (ageMin >= 3 || catastrophic)) {
+  // ROCKET-ADAPT: win-rate feedback shifts stop loss tighter on cold streaks
+  const stopLossLevel = trade.algo === 'h'
+    ? cfg.stopLoss + getRocketAdaptParams().stopAdj
+    : cfg.stopLoss;
+  if (mult <= stopLossLevel && (ageMin >= 3 || catastrophic)) {
     return { status: "CLOSED", exit: "STOP_LOSS", mult, pnl: +(bet * (mult - 1)).toFixed(2), highMult: hi };
   }
   if (ageMin >= cfg.trailingActivateMin && hi > 1.2 && mult <= hi * cfg.trailingPct) {
@@ -744,6 +947,7 @@ async function insertTrade(algoKey, p, sc, fomo, rugScore) {
   const age      = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : 0;
   const bet      = betSize(sc, algoKey, liq, age);
   const tokenAddr = p.baseToken?.address || p.pairAddress;
+  const algoType = ALGOS[algoKey]?.adaptive ? 'adaptive' : 'stable';
 
   const r = await db(
     `INSERT INTO trades_${algoKey}
@@ -751,13 +955,13 @@ async function insertTrade(algoKey, p, sc, fomo, rugScore) {
         status, highest_mult,
         vol_5m, vol_1h, liq, pc_5m, buys_5m, sells_5m,
         boosted, market_mood, age_min, fomo_score,
-        stealth_score, is_stealth, rug_score, algo, opened_at)
+        stealth_score, is_stealth, rug_score, algo, algo_version, algo_type, opened_at)
      VALUES
        ($1,$2,$3,$4,$5,$6,$7,
         'OPEN',1.0,
         $8,$9,$10,$11,$12,$13,
         $14,$15,$16,$17,
-        0,false,$18,$19,NOW())
+        0,false,$18,$19,'v16',$20,NOW())
      RETURNING *`,
     [
       p.baseToken?.symbol || "???",
@@ -779,6 +983,7 @@ async function insertTrade(algoKey, p, sc, fomo, rugScore) {
       fomo,
       rugScore || 0,
       algoKey,
+      algoType,
     ]
   );
 
@@ -901,7 +1106,10 @@ async function processAll(searchPairs, boostedPairs) {
     z: getZScore(p.pairAddress, p.volume?.m5 || 0), rug: rugCheck(p),
   }));
 
-  const entries = { a: 0, b: 0, c: 0, d: 0 };
+  // Update market FOMO average for WAVE-ADAPT dynamic bands
+  updateMarketFomo(scored.map(s => s.fomo));
+
+  const entries = { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0, h: 0 };
 
   for (const algoKey of ALGO_KEYS) {
     checkCircuit(algoKey);
@@ -924,11 +1132,8 @@ async function processAll(searchPairs, boostedPairs) {
       if (already) { await logSig(algoKey, p, sc, fomo, false, "already_traded"); continue; }
 
       const tokenKey = p.baseToken?.address || p.pairAddress;
-      const existing = crossAlgoExposure.get(tokenKey);
-      if (existing && existing.size >= 2 && !existing.has(algoKey)) {
-        await logSig(algoKey, p, sc, fomo, false, "cross_algo_limit");
-        continue;
-      }
+      // Paper trading: no cross-algo limit — all 8 algos can enter same token independently.
+      // This is required for a valid head-to-head comparison between stable and adaptive algos.
 
       const rugResult = p.baseToken?.address
         ? await checkRugcheck(p.baseToken.address)
@@ -957,7 +1162,7 @@ async function processAll(searchPairs, boostedPairs) {
       }
     }
   }
-  console.log(`  entries A:${entries.a} B:${entries.b} C:${entries.c} D:${entries.d}`);
+  console.log(`  entries A:${entries.a} B:${entries.b} C:${entries.c} D:${entries.d} E:${entries.e} F:${entries.f} G:${entries.g} H:${entries.h}`);
 }
 
 // ── CHECK POSITIONS ────────────────────────────────────────
@@ -1045,6 +1250,8 @@ async function checkPositions() {
             const snap   = { fomo: curFomo, liq: curLiq, vol5m: pair.volume?.m5||0, pc5m: parseFloat(pair.priceChange?.m5||0), buys5m: pair.txns?.m5?.buys||0, sells5m: pair.txns?.m5?.sells||0, holdMin: ageMin };
             await closeTrade(algoKey, trade.id, res, snap);
             st.dailyPnl += res.pnl;
+            // ROCKET-ADAPT: update rolling win-rate state on every close
+            if (algoKey === 'h') updateRocketAdaptState(res.pnl);
             checkCircuit(algoKey);
             console.log(`  [${algoKey.toUpperCase()}] CLOSED ${trade.ticker} ${res.exit} ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`);
           }
@@ -1157,7 +1364,7 @@ async function cleanupSignals() {
 }
 
 // ── STATS ──────────────────────────────────────────────────
-async function getAlgoStats(algoKey, dataset = 'v15') {
+async function getAlgoStats(algoKey, dataset = 'v16') {
   const tsFilter = archiveTimestamp
     ? (dataset === 'v14'
         ? `AND opened_at < '${archiveTimestamp}'`
@@ -1200,7 +1407,7 @@ async function getAlgoStats(algoKey, dataset = 'v15') {
 
 // ── API ROUTES ─────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({
-  status: "ok", ts: new Date().toISOString(), version: "15.0",
+  status: "ok", ts: new Date().toISOString(), version: "16.0",
   marketMood: mood, pollCount,
   dexStatus: dexIsBlocked() ? `blocked_until_${new Date(dexBackoffUntil).toISOString()}` : "ok",
   algos: Object.fromEntries(ALGO_KEYS.map(k => [k, {
@@ -1304,7 +1511,8 @@ app.post("/api/wipe", async (req, res) => {
       await db(`TRUNCATE signals_${k} RESTART IDENTITY`);
       algoState[k].dailyPnl = 0; algoState[k].circuitBroken = false; algoState[k].circuitAt = null;
     }
-    const old = ["wave","surge","steady","rocket","e","a1","b1","c1","d1","e1"];
+    // Clean up genuinely old table names only — do NOT include any current ALGO_KEYS
+    const old = ["wave","surge","steady","rocket","a1","b1","c1","d1","e1"];
     for (const o of old) { await pool.query(`TRUNCATE trades_${o} RESTART IDENTITY`).catch(() => {}); await pool.query(`TRUNCATE signals_${o} RESTART IDENTITY`).catch(() => {}); }
     res.json({ ok: true, message: "All data wiped." });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1363,7 +1571,7 @@ app.get("/api/system", async (req, res) => {
       openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
     }
     res.json({
-      ts: new Date().toISOString(), version: "15.0",
+      ts: new Date().toISOString(), version: "16.0",
       uptime: Math.round(process.uptime()), pollCount, marketMood: mood,
       dexStatus: dexIsBlocked() ? `blocked_${Math.round((dexBackoffUntil - Date.now()) / 1000)}s` : "ok",
       dexBackoffCount,
@@ -1404,7 +1612,7 @@ app.get("/api/report", async (req, res) => {
       openCounts[k] = r ? parseInt(r.rows[0].n) : "?";
     }
     res.json({
-      ts: new Date().toISOString(), version: "15.0",
+      ts: new Date().toISOString(), version: "16.0",
       uptime: Math.round(process.uptime()), pollCount, marketMood: mood,
       dexStatus: dexIsBlocked() ? `blocked_${Math.round((dexBackoffUntil - Date.now()) / 1000)}s` : "ok",
       funnel: sysStatus.funnel,
@@ -1417,13 +1625,14 @@ app.get("/api/report", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
-  res.status(200).send("S0NAR Iron Dome v15.0 running.");
+  res.status(200).send("S0NAR Iron Dome v16.0 running.");
 });
 
 // ── START ──────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`\nS0NAR IRON DOME v15.0 | Port:${PORT}`);
-  console.log(`Algos: WAVE | SURGE | STEADY | ROCKET`);
+  console.log(`\nS0NAR IRON DOME v16.0 | Port:${PORT}`);
+  console.log(`Stable:   WAVE | SURGE | STEADY | ROCKET`);
+  console.log(`Adaptive: WAVE-ADAPT | SURGE-ADAPT | STEADY-ADAPT | ROCKET-ADAPT`);
   console.log(`Poll: ${FETCH_MS}ms (slow/safe) | Check: ${CHECK_MS}ms | 429 backoff: active\n`);
   await initDB();
   await loadArchiveTimestamp();
