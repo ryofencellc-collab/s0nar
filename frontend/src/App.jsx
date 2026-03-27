@@ -1,4 +1,4 @@
-// S0NAR App.jsx v15.0 — 4-Algorithm Iron Dome
+// S0NAR App.jsx v16.0 — 4-Algorithm Iron Dome
 import React, { useState, useEffect, useRef } from "react";
 
 const API = "";
@@ -89,7 +89,7 @@ function LoginScreen({ onLogin }) {
     <div style={{background:BG,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Courier New',monospace"}}>
       <div style={{width:300,textAlign:"center",padding:"0 20px"}}>
         <div style={{fontSize:26,fontWeight:900,letterSpacing:4,color:G,marginBottom:6}}>◉ S0NAR</div>
-        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>IRON DOME v15.0</div>
+        <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>IRON DOME v16.0</div>
         <div style={{fontSize:8,color:ALGO_COLORS.a,marginBottom:30}}>4-ALGORITHM LAB</div>
         <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"20px"}}>
           <div style={{fontSize:8,color:DIM,letterSpacing:2,marginBottom:12}}>ACCESS CODE</div>
@@ -221,7 +221,7 @@ function AppInner({ token, headers, onLogout }) {
           </div>
           <div style={{textAlign:"right",flexShrink:0,paddingLeft:8}}>
             <div style={{fontSize:7,color:DIM}}>IRON DOME</div>
-            <div style={{fontSize:10,fontWeight:900,color:G}}>v15.0</div>
+            <div style={{fontSize:10,fontWeight:900,color:G}}>v16.0</div>
             <button onClick={onLogout} style={{fontSize:6,color:DIM,background:"transparent",border:"none",cursor:"pointer",letterSpacing:1}}>LOCK</button>
           </div>
         </div>
@@ -540,7 +540,7 @@ function AppInner({ token, headers, onLogout }) {
           </div>
           <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px"}}>
             <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:6}}>VERSION</div>
-            <div style={{fontSize:9,color:"white"}}>S0NAR Iron Dome v15.0</div>
+            <div style={{fontSize:9,color:"white"}}>S0NAR Iron Dome v16.0</div>
             <div style={{fontSize:8,color:DIM,marginTop:4}}>Poll: 45s · Check: 25s · 429 backoff: active</div>
             <div style={{fontSize:8,color:DIM,marginTop:2}}>4 algos: WAVE · SURGE · STEADY · ROCKET</div>
           </div>
@@ -565,10 +565,10 @@ function AppInner({ token, headers, onLogout }) {
       )}
 
       <div style={{padding:"5px",borderTop:`1px solid ${BORDER}`,background:CARD,fontSize:6,color:"#0c1820",textAlign:"center"}}>
-        S0NAR v15.0 · IRON DOME · PAPER TRADING · NOT FINANCIAL ADVICE
+        S0NAR v16.0 · IRON DOME · PAPER TRADING · NOT FINANCIAL ADVICE
       </div>
     </div>
   );
 }
 
-// end of App.jsx v15.0
+// end of App.jsx v16.0
