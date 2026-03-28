@@ -6,9 +6,11 @@ const API = "";
 const BG="#060a0d", CARD="#0b1016", BORDER="#12202c", DIM="#2d4a5e";
 const G="#00e676", R="#ff1744", Y="#ffd740", B="#40c4ff", O="#ff9100";
 
-const ALGO_COLORS = { a:"#00e5ff", b:"#ff6d00", c:"#69f0ae", d:"#ff1744" };
-const ALGO_NAMES  = { a:"WAVE", b:"SURGE", c:"STEADY", d:"ROCKET" };
-const ALGO_KEYS   = ["a","b","c","d"];
+const ALGO_COLORS = { a:"#00e5ff", b:"#ff6d00", c:"#69f0ae", d:"#ff1744", e:"#00bcd4", f:"#ff9800", g:"#4caf50", h:"#e91e63" };
+const ALGO_NAMES  = { a:"WAVE", b:"SURGE", c:"STEADY", d:"ROCKET", e:"WAVE-ADAPT", f:"SURGE-ADAPT", g:"STEADY-ADAPT", h:"ROCKET-ADAPT" };
+const ALGO_KEYS   = ["a","b","c","d","e","f","g","h"];
+const STABLE_KEYS = ["a","b","c","d"];
+const ADAPT_KEYS  = ["e","f","g","h"];
 
 const num  = v => { const n=parseFloat(v); return isNaN(n)?0:n; };
 const fix2 = v => num(v).toFixed(2);
@@ -90,7 +92,7 @@ function LoginScreen({ onLogin }) {
       <div style={{width:300,textAlign:"center",padding:"0 20px"}}>
         <div style={{fontSize:26,fontWeight:900,letterSpacing:4,color:G,marginBottom:6}}>◉ S0NAR</div>
         <div style={{fontSize:9,color:DIM,letterSpacing:3,marginBottom:8}}>IRON DOME v16.0</div>
-        <div style={{fontSize:8,color:ALGO_COLORS.a,marginBottom:30}}>4-ALGORITHM LAB</div>
+        <div style={{fontSize:8,color:ALGO_COLORS.a,marginBottom:30}}>8-ALGORITHM LAB · STABLE vs ADAPTIVE</div>
         <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:12,padding:"20px"}}>
           <div style={{fontSize:8,color:DIM,letterSpacing:2,marginBottom:12}}>ACCESS CODE</div>
           <input type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()} placeholder="Enter password" autoFocus
@@ -262,15 +264,41 @@ function AppInner({ token, headers, onLogout }) {
               </div>
             </div>
           )}
+          <div style={{fontSize:7,color:DIM,letterSpacing:3,marginBottom:6,paddingLeft:2}}>STABLE</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-            {ALGO_KEYS.map(k=>{
+            {STABLE_KEYS.map(k=>{
               const s=stats.find(st=>st.algo===k);
               return <AlgoCard key={k} stat={s} isSelected={selAlgo===k} onClick={()=>{setSelAlgo(k);setView("trades");fetchTrades(k);}}/>;
             })}
           </div>
-          {stats.length===4&&(
+          <div style={{fontSize:7,color:DIM,letterSpacing:3,marginBottom:6,paddingLeft:2}}>ADAPTIVE</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+            {ADAPT_KEYS.map(k=>{
+              const s=stats.find(st=>st.algo===k);
+              return <AlgoCard key={k} stat={s} isSelected={selAlgo===k} onClick={()=>{setSelAlgo(k);setView("trades");fetchTrades(k);}}/>;
+            })}
+          </div>
+          {stats.length===8&&(
             <div style={{background:CARD,border:`1px solid ${BORDER}`,borderRadius:10,padding:"12px",marginBottom:10}}>
               <div style={{fontSize:7,color:DIM,letterSpacing:2,marginBottom:10}}>COMBINED</div>
+              {/* Stable vs Adaptive comparison */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:10}}>
+                {[
+                  {l:"STABLE",  keys:STABLE_KEYS, c:"#00e5ff"},
+                  {l:"ADAPTIVE",keys:ADAPT_KEYS,  c:"#e91e63"},
+                ].map(grp=>{
+                  const grpStats = stats.filter(s=>grp.keys.includes(s.algo));
+                  const pnl = grpStats.reduce((a,s)=>a+num(s.totalPnl),0);
+                  const trades = grpStats.reduce((a,s)=>a+s.totalTrades,0);
+                  return (
+                    <div key={grp.l} style={{background:"#060a0d",borderRadius:8,padding:"8px",border:`1px solid ${grp.c}33`,textAlign:"center"}}>
+                      <div style={{fontSize:6,color:grp.c,letterSpacing:2,marginBottom:4}}>{grp.l}</div>
+                      <div style={{fontSize:16,fontWeight:900,color:pnl>=0?G:R}}>{fmt$(pnl)}</div>
+                      <div style={{fontSize:7,color:DIM,marginTop:2}}>{trades}t</div>
+                    </div>
+                  );
+                })}
+              </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
                 {[
                   {l:"TOTAL P&L",    v:fmt$(stats.reduce((a,s)=>a+num(s.totalPnl),0)),   c:stats.reduce((a,s)=>a+num(s.totalPnl),0)>=0?G:R},
