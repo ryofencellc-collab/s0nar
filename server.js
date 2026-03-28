@@ -1365,11 +1365,9 @@ async function cleanupSignals() {
 
 // ── STATS ──────────────────────────────────────────────────
 async function getAlgoStats(algoKey, dataset = 'v16') {
-  const tsFilter = archiveTimestamp
-    ? (dataset === 'v14'
-        ? `AND opened_at < '${archiveTimestamp}'`
-        : `AND opened_at >= '${archiveTimestamp}'`)
-    : ''; // No archive yet — show everything
+  const tsFilter = (archiveTimestamp && dataset === 'v14')
+    ? `AND opened_at < '${archiveTimestamp}'`
+    : ''; // v16 = show all trades, no timestamp filter
   const [closedRes, openRes] = await Promise.all([
     db(`SELECT pnl, exit_reason, exit_mult, closed_at, ticker FROM trades_${algoKey} WHERE status='CLOSED' ${tsFilter} ORDER BY closed_at ASC`),
     db(`SELECT id FROM trades_${algoKey} WHERE status='OPEN'`),
@@ -1591,11 +1589,9 @@ app.get("/api/report", async (req, res) => {
     const trades = {};
     const debug  = {};
     for (const k of ALGO_KEYS) {
-      // Filter by dataset if column exists, otherwise return all
-      const tsFilter = archiveTimestamp
-        ? (dataset === 'v14'
-            ? `WHERE opened_at < '${archiveTimestamp}'`
-            : `WHERE opened_at >= '${archiveTimestamp}'`)
+      // v14 = before archive timestamp, v16 = all trades (no filter)
+      const tsFilter = (archiveTimestamp && dataset === 'v14')
+        ? `WHERE opened_at < '${archiveTimestamp}'`
         : '';
       const t = await db(`SELECT * FROM trades_${k} ${tsFilter} ORDER BY opened_at DESC LIMIT 500`);
       trades[k] = t.rows;
