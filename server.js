@@ -1585,8 +1585,8 @@ app.get("/api/system", async (req, res) => {
 
 app.get("/api/report", async (req, res) => {
   try {
-    // dataset param: 'v14', 'v15', or omit for all (default shows current/v15 only)
-    const dataset = req.query.dataset || 'v15';
+    // dataset param: 'v14' for archived data, 'v16' for current (default), or omit for current
+    const dataset = req.query.dataset || 'v16';
     const stats = await Promise.all(ALGO_KEYS.map(k => getAlgoStats(k, dataset)));
     const trades = {};
     const debug  = {};
