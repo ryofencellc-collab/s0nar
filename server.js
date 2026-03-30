@@ -41,6 +41,12 @@ const path     = require("path");
 const crypto   = require("crypto");
 const fs       = require("fs");
 
+// ── LIVE TRADING — SOLANA ──────────────────────────────────
+const {
+  Connection, Keypair, VersionedTransaction, PublicKey,
+} = require("@solana/web3.js");
+const bs58 = require("bs58");
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -91,6 +97,15 @@ const TRADE_COLS = `
   algo TEXT,
   algo_version TEXT DEFAULT 'v16',
   algo_type TEXT DEFAULT 'stable',
+  is_live BOOLEAN DEFAULT FALSE,
+  live_tx_buy TEXT,
+  live_tx_sell TEXT,
+  live_token_mint TEXT,
+  live_entry_price NUMERIC,
+  live_bet_sol NUMERIC,
+  live_pnl NUMERIC,
+  live_slippage_pct NUMERIC,
+  live_status TEXT DEFAULT 'none',
   opened_at TIMESTAMPTZ DEFAULT NOW(),
   closed_at TIMESTAMPTZ,
   exit_fomo INTEGER DEFAULT 0,
@@ -132,6 +147,15 @@ async function initDB() {
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS algo_type TEXT DEFAULT 'stable'`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS dataset TEXT DEFAULT NULL`).catch(() => {});
     // Note: existing rows correctly get 'v15' default. New v16 trades write 'v16' explicitly in insertTrade.
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS is_live BOOLEAN DEFAULT FALSE`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS live_tx_buy TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS live_tx_sell TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS live_token_mint TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS live_entry_price NUMERIC`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS live_bet_sol NUMERIC`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS live_pnl NUMERIC`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS live_slippage_pct NUMERIC`).catch(() => {});
+    await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS live_status TEXT DEFAULT 'none'`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_fomo INTEGER DEFAULT 0`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_liq NUMERIC DEFAULT 0`).catch(() => {});
     await pool.query(`ALTER TABLE trades_${k} ADD COLUMN IF NOT EXISTS exit_vol_5m NUMERIC DEFAULT 0`).catch(() => {});
@@ -330,6 +354,42 @@ const ALGOS = {
 const DAILY_LIMIT = 200; // Circuit break per algo per day
 const FETCH_MS    = 45000; // Poll every 45s — slow enough to avoid 429 bans
 const CHECK_MS    = 25000; // Check positions every 25s
+
+// ── LIVE TRADING CONFIG ────────────────────────────────────
+const LIVE_ENABLED   = process.env.LIVE_TRADING === "true";
+const LIVE_NETWORK   = process.env.SOLANA_NETWORK || "devnet"; // "devnet" or "mainnet-beta"
+const LIVE_BET_USD   = parseFloat(process.env.LIVE_BET_SIZE || "25");
+const HELIUS_RPC     = process.env.HELIUS_RPC || null;
+
+// Algos excluded from live trading until they have enough history
+const LIVE_EXCLUDED  = ["f"]; // SURGE-ADAPT excluded — no trade history yet
+
+// Slippage per algo type in basis points (100 bps = 1%)
+const SLIPPAGE_BPS = {
+  a: 300,  // WAVE: 3%
+  b: 500,  // SURGE: 5%
+  c: 200,  // STEADY: 2%
+  d: 500,  // ROCKET: 5%
+  e: 300,  // WAVE-ADAPT: 3%
+  f: 500,  // SURGE-ADAPT: 5%
+  g: 200,  // STEADY-ADAPT: 2%
+  h: 500,  // ROCKET-ADAPT: 5%
+};
+
+// SOL price cache — updated every 5 minutes
+let solPriceUsd = 140; // Fallback, gets updated on startup
+
+// Live trading state
+const liveState = {
+  wallet:      null,   // Keypair loaded from env
+  connection:  null,   // Solana RPC connection
+  walletPubkey: null,  // Public key string
+  solBalance:  0,      // SOL balance
+  usdBalance:  0,      // USD equivalent
+  initialized: false,
+  lastBalanceCheck: 0,
+  errors: [],          // Recent live trading errors
+};
 
 // ── RUNTIME STATE ──────────────────────────────────────────
 let mood      = "normal";
@@ -699,6 +759,237 @@ function rugCheck(p) {
   return { pass: w.length === 0, warnings: w };
 }
 
+// ── LIVE TRADING ENGINE ────────────────────────────────────
+
+async function initWallet() {
+  if (!LIVE_ENABLED) return;
+  const privKey = process.env.WALLET_PRIVATE_KEY;
+  if (!privKey) {
+    console.log("[LIVE] No WALLET_PRIVATE_KEY set — live trading disabled");
+    return;
+  }
+  try {
+    const rpcUrl = HELIUS_RPC || (LIVE_NETWORK === "devnet"
+      ? "https://api.devnet.solana.com"
+      : "https://api.mainnet-beta.solana.com");
+
+    liveState.connection  = new Connection(rpcUrl, "confirmed");
+    liveState.wallet      = Keypair.fromSecretKey(bs58.decode(privKey));
+    liveState.walletPubkey = liveState.wallet.publicKey.toString();
+    liveState.initialized = true;
+
+    const bal = await liveState.connection.getBalance(liveState.wallet.publicKey);
+    liveState.solBalance = bal / 1e9;
+    liveState.usdBalance = liveState.solBalance * solPriceUsd;
+
+    console.log(`[LIVE] Wallet: ${liveState.walletPubkey}`);
+    console.log(`[LIVE] Network: ${LIVE_NETWORK}`);
+    console.log(`[LIVE] Balance: ${liveState.solBalance.toFixed(4)} SOL (~$${liveState.usdBalance.toFixed(2)})`);
+    console.log(`[LIVE] Bet size: $${LIVE_BET_USD} per trade`);
+  } catch (e) {
+    console.error("[LIVE] Wallet init failed:", e.message);
+    liveState.initialized = false;
+  }
+}
+
+async function updateSolPrice() {
+  try {
+    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", { timeout: 5000 });
+    if (r.ok) {
+      const d = await r.json();
+      solPriceUsd = d?.solana?.usd || solPriceUsd;
+    }
+  } catch (e) {}
+}
+
+async function updateWalletBalance() {
+  if (!liveState.initialized) return;
+  try {
+    const bal = await liveState.connection.getBalance(liveState.wallet.publicKey);
+    liveState.solBalance = bal / 1e9;
+    liveState.usdBalance = liveState.solBalance * solPriceUsd;
+    liveState.lastBalanceCheck = Date.now();
+  } catch (e) {}
+}
+
+// Jupiter V6 API swap
+async function jupiterSwap(inputMint, outputMint, amountLamports, slippageBps) {
+  try {
+    // Get quote
+    const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountLamports}&slippageBps=${slippageBps}`;
+    const quoteRes = await fetch(quoteUrl, { timeout: 10000 });
+    if (!quoteRes.ok) throw new Error(`Quote failed: ${quoteRes.status}`);
+    const quote = await quoteRes.json();
+    if (quote.error) throw new Error(`Quote error: ${quote.error}`);
+
+    // Get swap transaction
+    const swapRes = await fetch("https://quote-api.jup.ag/v6/swap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        quoteResponse: quote,
+        userPublicKey: liveState.walletPubkey,
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+        prioritizationFeeLamports: 5000, // ~$0.001 priority fee for speed
+      }),
+      timeout: 10000,
+    });
+    if (!swapRes.ok) throw new Error(`Swap failed: ${swapRes.status}`);
+    const { swapTransaction } = await swapRes.json();
+
+    // Deserialize, sign, send
+    const txBuf = Buffer.from(swapTransaction, "base64");
+    const tx    = VersionedTransaction.deserialize(txBuf);
+    tx.sign([liveState.wallet]);
+
+    const sig = await liveState.connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+      maxRetries: 3,
+    });
+
+    // Confirm
+    const conf = await liveState.connection.confirmTransaction(sig, "confirmed");
+    if (conf.value.err) throw new Error(`TX failed on-chain: ${JSON.stringify(conf.value.err)}`);
+
+    return { success: true, signature: sig, quote };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// SOL mint address
+const SOL_MINT  = "So11111111111111111111111111111111111111112";
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+async function executeLiveBuy(algoKey, p, tradeId) {
+  if (!LIVE_ENABLED || !liveState.initialized) return null;
+  if (LIVE_EXCLUDED.includes(algoKey)) return null;
+
+  const tokenMint = p.baseToken?.address;
+  if (!tokenMint) return null;
+
+  try {
+    // Convert $25 to SOL lamports
+    const solNeeded   = LIVE_BET_USD / solPriceUsd;
+    const lamports    = Math.floor(solNeeded * 1e9);
+    const slippageBps = SLIPPAGE_BPS[algoKey] || 300;
+
+    console.log(`  [LIVE][${algoKey.toUpperCase()}] BUY ${p.baseToken?.symbol} $${LIVE_BET_USD} (${solNeeded.toFixed(4)} SOL)`);
+
+    const result = await jupiterSwap(SOL_MINT, tokenMint, lamports, slippageBps);
+
+    if (result.success) {
+      // Calculate actual entry price and slippage
+      const paperPrice    = parseFloat(p.priceUsd);
+      const outAmount     = parseFloat(result.quote.outAmount);
+      const inAmount      = parseFloat(result.quote.inAmount) / 1e9; // SOL
+      const livePrice     = (inAmount * solPriceUsd) / outAmount;
+      const slippagePct   = ((livePrice - paperPrice) / paperPrice) * 100;
+
+      // Update trade row with live data including token mint for precise sell
+      await db(
+        `UPDATE trades_${algoKey} SET is_live=true, live_tx_buy=$1, live_token_mint=$2, live_entry_price=$3, live_bet_sol=$4, live_slippage_pct=$5, live_status='open' WHERE id=$6`,
+        [result.signature, tokenMint, livePrice, inAmount, +slippagePct.toFixed(3), tradeId]
+      );
+
+      await updateWalletBalance();
+      console.log(`  [LIVE][${algoKey.toUpperCase()}] BUY OK tx:${result.signature.slice(0,12)}... slippage:${slippagePct.toFixed(2)}%`);
+      return result.signature;
+    } else {
+      console.log(`  [LIVE][${algoKey.toUpperCase()}] BUY FAILED: ${result.error}`);
+      liveState.errors.unshift({ at: new Date().toISOString(), algo: algoKey, side: "buy", err: result.error });
+      if (liveState.errors.length > 20) liveState.errors.pop();
+      return null;
+    }
+  } catch (e) {
+    console.error(`  [LIVE][${algoKey.toUpperCase()}] BUY error:`, e.message);
+    return null;
+  }
+}
+
+async function executeLiveSell(algoKey, trade) {
+  if (!LIVE_ENABLED || !liveState.initialized) return null;
+  if (!trade.is_live || trade.live_status !== "open") return null;
+
+  try {
+    // First try to use the stored token mint from the buy
+    const mintRow = await db(`SELECT live_token_mint FROM trades_${algoKey} WHERE id=$1`, [trade.id]);
+    const storedMint = mintRow.rows[0]?.live_token_mint;
+
+    const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+    let bestMint    = null;
+    let bestBalance = 0;
+
+    if (storedMint) {
+      // Use stored mint for precise lookup
+      try {
+        const tokenAccounts = await liveState.connection.getParsedTokenAccountsByOwner(
+          liveState.wallet.publicKey,
+          { mint: new PublicKey(storedMint) }
+        );
+        if (tokenAccounts.value.length) {
+          const bal = parseFloat(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+          if (bal > 0) { bestMint = storedMint; bestBalance = bal; }
+        }
+      } catch (e) {}
+    }
+
+    // Fall back: scan all token accounts
+    if (!bestMint) {
+      const allAccounts = await liveState.connection.getParsedTokenAccountsByOwner(
+        liveState.wallet.publicKey,
+        { programId: TOKEN_PROGRAM }
+      ).catch(() => null);
+
+      if (allAccounts) {
+        for (const acc of allAccounts.value) {
+          const info    = acc.account.data.parsed.info;
+          const balance = parseFloat(info.tokenAmount.amount);
+          if (balance > bestBalance) {
+            bestBalance = balance;
+            bestMint    = info.mint;
+          }
+        }
+      }
+    }
+
+    if (!bestMint || bestBalance === 0) {
+      console.log(`  [LIVE][${algoKey.toUpperCase()}] No token balance to sell for ${trade.ticker}`);
+      await db(`UPDATE trades_${algoKey} SET live_status='sold_empty' WHERE id=$1`, [trade.id]);
+      return null;
+    }
+
+    const slippageBps = SLIPPAGE_BPS[algoKey] || 300;
+    console.log(`  [LIVE][${algoKey.toUpperCase()}] SELL ${trade.ticker} mint:${bestMint.slice(0,8)}... balance:${bestBalance}`);
+
+    const result = await jupiterSwap(bestMint, SOL_MINT, String(Math.floor(bestBalance)), slippageBps);
+
+    if (result.success) {
+      const solReceived = parseFloat(result.quote.outAmount) / 1e9;
+      const usdReceived = solReceived * solPriceUsd;
+      const livePnl     = +(usdReceived - LIVE_BET_USD).toFixed(2);
+
+      await db(
+        `UPDATE trades_${algoKey} SET live_tx_sell=$1, live_pnl=$2, live_status='closed' WHERE id=$3`,
+        [result.signature, livePnl, trade.id]
+      );
+
+      await updateWalletBalance();
+      console.log(`  [LIVE][${algoKey.toUpperCase()}] SELL OK tx:${result.signature.slice(0,12)}... live_pnl:${livePnl>=0?"+":""}$${livePnl}`);
+      return result.signature;
+    } else {
+      console.log(`  [LIVE][${algoKey.toUpperCase()}] SELL FAILED: ${result.error}`);
+      liveState.errors.unshift({ at: new Date().toISOString(), algo: algoKey, side: "sell", err: result.error });
+      if (liveState.errors.length > 20) liveState.errors.pop();
+      return null;
+    }
+  } catch (e) {
+    console.error(`  [LIVE][${algoKey.toUpperCase()}] SELL error:`, e.message);
+    return null;
+  }
+}
+
 // ── ADAPTIVE ENGINE ────────────────────────────────────────
 // Rolling market FOMO average — computed across all tokens seen in last poll
 // Used by WAVE-ADAPT to dynamically shift its FOMO entry band
@@ -990,6 +1281,10 @@ async function insertTrade(algoKey, p, sc, fomo, rugScore) {
   if (r.rows[0]) {
     if (!crossAlgoExposure.has(tokenAddr)) crossAlgoExposure.set(tokenAddr, new Set());
     crossAlgoExposure.get(tokenAddr).add(algoKey);
+    // Fire live trade alongside paper trade
+    if (LIVE_ENABLED && !LIVE_EXCLUDED.includes(algoKey)) {
+      executeLiveBuy(algoKey, p, r.rows[0].id).catch(e => console.error("[LIVE] Buy hook error:", e.message));
+    }
   }
   return r.rows[0];
 }
@@ -1252,6 +1547,10 @@ async function checkPositions() {
             st.dailyPnl += res.pnl;
             // ROCKET-ADAPT: update rolling win-rate state on every close
             if (algoKey === 'h') updateRocketAdaptState(res.pnl);
+            // Fire live sell alongside paper close
+            if (LIVE_ENABLED && trade.is_live) {
+              executeLiveSell(algoKey, trade).catch(e => console.error("[LIVE] Sell hook error:", e.message));
+            }
             checkCircuit(algoKey);
             console.log(`  [${algoKey.toUpperCase()}] CLOSED ${trade.ticker} ${res.exit} ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`);
           }
@@ -1408,6 +1707,14 @@ app.get("/health", (req, res) => res.json({
   status: "ok", ts: new Date().toISOString(), version: "16.0",
   marketMood: mood, pollCount,
   dexStatus: dexIsBlocked() ? `blocked_until_${new Date(dexBackoffUntil).toISOString()}` : "ok",
+  live: {
+    enabled: LIVE_ENABLED,
+    network: LIVE_NETWORK,
+    initialized: liveState.initialized,
+    wallet: liveState.walletPubkey ? liveState.walletPubkey.slice(0,8)+"..." : null,
+    solBalance: liveState.solBalance,
+    usdBalance: +liveState.usdBalance.toFixed(2),
+  },
   algos: Object.fromEntries(ALGO_KEYS.map(k => [k, {
     name: ALGOS[k].name,
     dailyPnl: +algoState[k].dailyPnl.toFixed(2),
@@ -1618,6 +1925,38 @@ app.get("/api/report", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get("/api/live", async (req, res) => {
+  try {
+    // Pull all live trades across all algos
+    const liveTrades = {};
+    for (const k of ALGO_KEYS) {
+      const r = await db(`SELECT id, ticker, algo, opened_at, bet_size, live_tx_buy, live_tx_sell, live_entry_price, live_bet_sol, live_pnl, live_slippage_pct, live_status, entry_price, pnl, exit_reason FROM trades_${k} WHERE is_live=true ORDER BY opened_at DESC LIMIT 50`);
+      liveTrades[k] = r.rows;
+    }
+    const allLive = Object.values(liveTrades).flat();
+    const closed  = allLive.filter(t => t.live_status === "closed");
+    const open    = allLive.filter(t => t.live_status === "open");
+    const livePnl = closed.reduce((a, t) => a + parseFloat(t.live_pnl || 0), 0);
+
+    res.json({
+      enabled:     LIVE_ENABLED,
+      network:     LIVE_NETWORK,
+      betSize:     LIVE_BET_USD,
+      excluded:    LIVE_EXCLUDED,
+      wallet:      liveState.walletPubkey,
+      solBalance:  liveState.solBalance,
+      usdBalance:  +liveState.usdBalance.toFixed(2),
+      solPrice:    solPriceUsd,
+      initialized: liveState.initialized,
+      openTrades:  open.length,
+      closedTrades: closed.length,
+      totalLivePnl: +livePnl.toFixed(2),
+      recentErrors: liveState.errors.slice(0, 5),
+      trades: liveTrades,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
@@ -1634,6 +1973,8 @@ app.listen(PORT, async () => {
   await loadArchiveTimestamp();
   await refreshDaily();
   await updateMood();
+  await updateSolPrice();
+  await initWallet();
   setTimeout(pollSignals, 3000);
   setInterval(pollSignals,       FETCH_MS);
   setInterval(checkPositions,    CHECK_MS);
@@ -1641,4 +1982,6 @@ app.listen(PORT, async () => {
   setInterval(updateMood,        5 * 60 * 1000);
   setInterval(refreshDaily,      2 * 60 * 1000);
   setInterval(cleanupSignals,    6 * 60 * 60 * 1000);
+  setInterval(updateSolPrice,    5 * 60 * 1000);
+  setInterval(updateWalletBalance, 60 * 1000);
 });
