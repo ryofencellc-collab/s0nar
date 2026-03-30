@@ -815,48 +815,62 @@ async function updateWalletBalance() {
 
 // Jupiter V6 API swap
 async function jupiterSwap(inputMint, outputMint, amountLamports, slippageBps) {
-  try {
-    // Get quote
-    const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountLamports}&slippageBps=${slippageBps}`;
-    const quoteRes = await fetch(quoteUrl, { timeout: 10000 });
-    if (!quoteRes.ok) throw new Error(`Quote failed: ${quoteRes.status}`);
-    const quote = await quoteRes.json();
-    if (quote.error) throw new Error(`Quote error: ${quote.error}`);
+  // Jupiter API endpoints — try primary first, fall back if DNS fails
+  const JUP_ENDPOINTS = [
+    "https://quote-api.jup.ag/v6",
+    "https://lite-api.jup.ag/v6",
+    "https://public.jupiterapi.com",
+  ];
 
-    // Get swap transaction
-    const swapRes = await fetch("https://quote-api.jup.ag/v6/swap", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey: liveState.walletPubkey,
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: 5000, // ~$0.001 priority fee for speed
-      }),
-      timeout: 10000,
-    });
-    if (!swapRes.ok) throw new Error(`Swap failed: ${swapRes.status}`);
-    const { swapTransaction } = await swapRes.json();
+  for (const JUP_BASE of JUP_ENDPOINTS) {
+    try {
+      // Get quote
+      const quoteUrl = `${JUP_BASE}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountLamports}&slippageBps=${slippageBps}`;
+      const quoteRes = await fetch(quoteUrl, { timeout: 10000 });
+      if (!quoteRes.ok) continue;
+      const quote = await quoteRes.json();
+      if (quote.error) continue;
 
-    // Deserialize, sign, send
-    const txBuf = Buffer.from(swapTransaction, "base64");
-    const tx    = VersionedTransaction.deserialize(txBuf);
-    tx.sign([liveState.wallet]);
+      // Get swap transaction
+      const swapRes = await fetch(`${JUP_BASE}/swap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          quoteResponse: quote,
+          userPublicKey: liveState.walletPubkey,
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: 5000,
+        }),
+        timeout: 10000,
+      });
+      if (!swapRes.ok) continue;
+      const { swapTransaction } = await swapRes.json();
+      if (!swapTransaction) continue;
 
-    const sig = await liveState.connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: false,
-      maxRetries: 3,
-    });
+      // Deserialize, sign, send
+      const txBuf = Buffer.from(swapTransaction, "base64");
+      const tx    = VersionedTransaction.deserialize(txBuf);
+      tx.sign([liveState.wallet]);
 
-    // Confirm
-    const conf = await liveState.connection.confirmTransaction(sig, "confirmed");
-    if (conf.value.err) throw new Error(`TX failed on-chain: ${JSON.stringify(conf.value.err)}`);
+      const sig = await liveState.connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+      });
 
-    return { success: true, signature: sig, quote };
-  } catch (e) {
-    return { success: false, error: e.message };
+      // Confirm
+      const conf = await liveState.connection.confirmTransaction(sig, "confirmed");
+      if (conf.value.err) throw new Error(`TX failed on-chain: ${JSON.stringify(conf.value.err)}`);
+
+      console.log(`  [LIVE] Swap via ${JUP_BASE}`);
+      return { success: true, signature: sig, quote };
+    } catch (e) {
+      console.log(`  [LIVE] ${JUP_BASE} failed: ${e.message} — trying next endpoint`);
+      continue;
+    }
   }
+
+  return { success: false, error: "All Jupiter endpoints failed" };
 }
 
 // SOL mint address
