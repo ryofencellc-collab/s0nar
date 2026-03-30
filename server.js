@@ -762,10 +762,10 @@ function rugCheck(p) {
 // ── LIVE TRADING ENGINE ────────────────────────────────────
 
 async function initWallet() {
-  if (!LIVE_ENABLED) return;
+  // Always initialize wallet connection — trades only fire when LIVE_ENABLED=true
   const privKey = process.env.WALLET_PRIVATE_KEY;
   if (!privKey) {
-    console.log("[LIVE] No WALLET_PRIVATE_KEY set — live trading disabled");
+    console.log("[LIVE] No WALLET_PRIVATE_KEY set — wallet not loaded");
     return;
   }
   try {
@@ -773,10 +773,10 @@ async function initWallet() {
       ? "https://api.devnet.solana.com"
       : "https://api.mainnet-beta.solana.com");
 
-    liveState.connection  = new Connection(rpcUrl, "confirmed");
-    liveState.wallet      = Keypair.fromSecretKey(bs58.decode(privKey));
+    liveState.connection   = new Connection(rpcUrl, "confirmed");
+    liveState.wallet       = Keypair.fromSecretKey(bs58.decode(privKey));
     liveState.walletPubkey = liveState.wallet.publicKey.toString();
-    liveState.initialized = true;
+    liveState.initialized  = true;
 
     const bal = await liveState.connection.getBalance(liveState.wallet.publicKey);
     liveState.solBalance = bal / 1e9;
@@ -785,6 +785,7 @@ async function initWallet() {
     console.log(`[LIVE] Wallet: ${liveState.walletPubkey}`);
     console.log(`[LIVE] Network: ${LIVE_NETWORK}`);
     console.log(`[LIVE] Balance: ${liveState.solBalance.toFixed(4)} SOL (~$${liveState.usdBalance.toFixed(2)})`);
+    console.log(`[LIVE] Trading: ${LIVE_ENABLED ? "ENABLED" : "disabled (set LIVE_TRADING=true to enable)"}`);
     console.log(`[LIVE] Bet size: $${LIVE_BET_USD} per trade`);
   } catch (e) {
     console.error("[LIVE] Wallet init failed:", e.message);
