@@ -205,11 +205,16 @@ app.post("/api/login", (req, res) => {
   res.json({ token: VALID_TOKEN, ok: true });
 });
 
-const STATIC_DIR = path.join(__dirname, "dist");
-const hasDist    = fs.existsSync(path.join(STATIC_DIR, "index.html"));
+const STATIC_DIR  = path.join(__dirname, "dist");
+const hasDist     = fs.existsSync(path.join(STATIC_DIR, "index.html"));
+const ROOT_INDEX  = path.join(__dirname, "index.html");
+const hasRootIndex = fs.existsSync(ROOT_INDEX);
 if (hasDist) {
   app.use(express.static(STATIC_DIR));
   console.log("Serving frontend from dist/");
+} else if (hasRootIndex) {
+  app.use(express.static(__dirname));
+  console.log("Serving frontend from root index.html");
 }
 
 // ── ALGO CONFIGS ───────────────────────────────────────────
@@ -1975,6 +1980,7 @@ app.get("/api/live", async (req, res) => {
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Not found" });
   if (hasDist) return res.sendFile(path.join(STATIC_DIR, "index.html"));
+  if (hasRootIndex) return res.sendFile(ROOT_INDEX);
   res.status(200).send("S0NAR Iron Dome v16.0 running.");
 });
 
