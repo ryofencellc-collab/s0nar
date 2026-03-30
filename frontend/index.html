@@ -1,12 +1,490 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>S0NAR v9.5</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>S0NAR — IRON DOME</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
+
+  :root {
+    --bg: #030508;
+    --card: #080d12;
+    --border: #0f1f2e;
+    --g: #00ff88;
+    --r: #ff2244;
+    --y: #ffd000;
+    --b: #00aaff;
+    --dim: #1a3a52;
+    --text: #7ab8d4;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Share Tech Mono', monospace;
+    min-height: 100vh;
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 12px;
+  }
+
+  /* Scanline effect */
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,136,0.015) 2px, rgba(0,255,136,0.015) 4px);
+    pointer-events: none;
+    z-index: 999;
+  }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 14px;
+  }
+
+  .logo {
+    font-family: 'Orbitron', monospace;
+    font-weight: 900;
+    font-size: 20px;
+    color: var(--g);
+    letter-spacing: 3px;
+    text-shadow: 0 0 20px rgba(0,255,136,0.4);
+  }
+
+  .logo span { color: var(--dim); font-size: 10px; display: block; letter-spacing: 4px; font-weight: 400; margin-top: 2px; }
+
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--g);
+    box-shadow: 0 0 8px var(--g);
+    animation: pulse 2s infinite;
+  }
+  .status-dot.offline { background: var(--r); box-shadow: 0 0 8px var(--r); }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .wallet-card {
+    background: var(--card);
+    border: 1px solid rgba(0,255,136,0.15);
+    border-left: 3px solid var(--g);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 10px;
+  }
+
+  .wallet-label {
+    font-size: 9px;
+    color: var(--g);
+    letter-spacing: 3px;
+    margin-bottom: 10px;
+  }
+
+  .wallet-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+
+  .wallet-item { text-align: center; }
+  .wallet-item .val {
+    font-family: 'Orbitron', monospace;
+    font-size: 20px;
+    font-weight: 700;
+    color: white;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .wallet-item .val.green { color: var(--g); text-shadow: 0 0 12px rgba(0,255,136,0.3); }
+  .wallet-item .val.red { color: var(--r); }
+  .wallet-item .lbl { font-size: 7px; color: var(--dim); letter-spacing: 2px; }
+
+  .wallet-footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 8px;
+    color: var(--dim);
+  }
+
+  .connected { color: var(--g); }
+  .error-flag { color: var(--r); }
+
+  .counts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .count-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    text-align: center;
+  }
+
+  .count-card .num {
+    font-family: 'Orbitron', monospace;
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+
+  .count-card .lbl { font-size: 7px; color: var(--dim); letter-spacing: 2px; }
+
+  .section-label {
+    font-size: 8px;
+    color: var(--dim);
+    letter-spacing: 3px;
+    margin-bottom: 8px;
+    margin-top: 4px;
+  }
+
+  .trade-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .trade-card.open { border-left: 3px solid var(--y); }
+  .trade-card.win  { border-left: 3px solid var(--g); }
+  .trade-card.loss { border-left: 3px solid var(--r); }
+
+  .trade-card::before {
+    content: '';
+    position: absolute;
+    top: 0; right: 0;
+    width: 60px; height: 100%;
+    background: linear-gradient(to left, rgba(255,255,255,0.02), transparent);
+  }
+
+  .trade-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+
+  .trade-ticker {
+    font-family: 'Orbitron', monospace;
+    font-size: 14px;
+    font-weight: 700;
+    color: white;
+  }
+
+  .trade-algo {
+    font-size: 7px;
+    color: var(--dim);
+    margin-top: 2px;
+    letter-spacing: 1px;
+  }
+
+  .trade-pnl {
+    font-family: 'Orbitron', monospace;
+    font-size: 18px;
+    font-weight: 700;
+  }
+
+  .trade-pnl.pos { color: var(--g); text-shadow: 0 0 10px rgba(0,255,136,0.3); }
+  .trade-pnl.neg { color: var(--r); }
+  .trade-pnl.open { color: var(--y); }
+
+  .trade-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 8px;
+    color: var(--dim);
+    margin-bottom: 6px;
+  }
+
+  .trade-tx {
+    font-size: 7px;
+    color: var(--b);
+    text-decoration: none;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .trade-tx:hover { color: white; }
+
+  .exit-tag {
+    font-size: 7px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.05);
+    color: var(--dim);
+    letter-spacing: 1px;
+  }
+
+  .empty {
+    text-align: center;
+    padding: 50px 20px;
+    color: var(--dim);
+  }
+
+  .empty .icon { font-size: 28px; margin-bottom: 12px; }
+  .empty .msg { font-size: 10px; letter-spacing: 2px; margin-bottom: 6px; color: var(--text); }
+  .empty .sub { font-size: 8px; letter-spacing: 1px; }
+
+  .error-card {
+    background: rgba(255,34,68,0.05);
+    border: 1px solid rgba(255,34,68,0.2);
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 8px;
+  }
+
+  .error-label { font-size: 8px; color: var(--r); letter-spacing: 2px; margin-bottom: 6px; }
+  .error-item { font-size: 7px; color: var(--dim); margin-bottom: 3px; }
+  .error-item span { color: var(--r); }
+
+  .refresh-btn {
+    width: 100%;
+    padding: 10px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 3px;
+    cursor: pointer;
+    margin-top: 8px;
+    transition: all 0.2s;
+  }
+
+  .refresh-btn:hover { border-color: var(--g); color: var(--g); }
+
+  .algo-colors {
+    --a: #00e5ff; --b: #ff6d00; --c: #69f0ae; --d: #ff1744;
+    --e: #00bcd4; --f: #ff9800; --g2: #4caf50; --h: #e91e63;
+  }
+
+  .live-tag {
+    font-size: 7px;
+    color: var(--y);
+    letter-spacing: 2px;
+    animation: pulse 1.5s infinite;
+  }
+
+  .last-update {
+    text-align: center;
+    font-size: 7px;
+    color: var(--dim);
+    margin-top: 8px;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    ◉ S0NAR
+    <span>IRON DOME v16.0</span>
+  </div>
+  <div id="statusDot" class="status-dot offline"></div>
+</header>
+
+<div id="app">
+  <div class="empty">
+    <div class="icon">⟳</div>
+    <div class="msg">CONNECTING...</div>
+  </div>
+</div>
+
+<script>
+const ALGO_NAMES = {
+  a:'WAVE', b:'SURGE', c:'STEADY', d:'ROCKET',
+  e:'WAVE-ADAPT', f:'SURGE-ADAPT', g:'STEADY-ADAPT', h:'ROCKET-ADAPT'
+};
+const ALGO_COLORS = {
+  a:'#00e5ff', b:'#ff6d00', c:'#69f0ae', d:'#ff1744',
+  e:'#00bcd4', f:'#ff9800', g:'#4caf50', h:'#e91e63'
+};
+
+const TOKEN = '22741ec8c25a1b8e425854c3d01225315e37987c85c6483019f3cdaf425716f7';
+
+function fmt$(v) {
+  const n = parseFloat(v) || 0;
+  return (n >= 0 ? '+' : '') + '$' + Math.abs(n).toFixed(2);
+}
+
+function timeSince(dateStr) {
+  if (!dateStr) return '--';
+  const mins = Math.floor((Date.now() - new Date(dateStr)) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins/60)}h ${mins%60}m ago`;
+}
+
+async function fetchLive() {
+  try {
+    const r = await fetch(`/api/live?token=${TOKEN}`);
+    const d = await r.json();
+    render(d);
+    document.getElementById('statusDot').className = 'status-dot';
+  } catch(e) {
+    document.getElementById('statusDot').className = 'status-dot offline';
+    document.getElementById('app').innerHTML = `
+      <div class="empty">
+        <div class="icon">⚠</div>
+        <div class="msg">CONNECTION LOST</div>
+        <div class="sub">Retrying...</div>
+      </div>`;
+  }
+}
+
+function render(d) {
+  const allTrades = Object.entries(d.trades || {}).flatMap(([k, arr]) =>
+    arr.map(t => ({ ...t, algoKey: k }))
+  );
+  const openTrades   = allTrades.filter(t => t.live_status === 'open');
+  const closedTrades = allTrades.filter(t => t.live_status === 'closed')
+    .sort((a, b) => new Date(b.closed_at || b.opened_at) - new Date(a.closed_at || a.opened_at));
+
+  const pnlColor = parseFloat(d.totalLivePnl) >= 0 ? 'green' : 'red';
+  const errCount = d.recentErrors?.length || 0;
+
+  let html = `
+    <div class="wallet-card">
+      <div class="wallet-label">◈ LIVE WALLET</div>
+      <div class="wallet-grid">
+        <div class="wallet-item">
+          <div class="val">${parseFloat(d.solBalance || 0).toFixed(3)}</div>
+          <div class="lbl">SOL</div>
+        </div>
+        <div class="wallet-item">
+          <div class="val green">$${parseFloat(d.usdBalance || 0).toFixed(2)}</div>
+          <div class="lbl">USD VALUE</div>
+        </div>
+        <div class="wallet-item">
+          <div class="val ${pnlColor}">${fmt$(d.totalLivePnl)}</div>
+          <div class="lbl">LIVE P&L</div>
+        </div>
+      </div>
+      <div class="wallet-footer">
+        <span>SOL $${parseFloat(d.solPrice || 0).toFixed(2)}</span>
+        <span>BET $${d.betSize} / trade</span>
+        <span class="${errCount ? 'error-flag' : 'connected'}">${errCount ? '⚠ ' + errCount + ' errors' : '✓ CONNECTED'}</span>
+      </div>
+    </div>
+
+    <div class="counts">
+      <div class="count-card">
+        <div class="num" style="color:#ffd000">${openTrades.length}</div>
+        <div class="lbl">OPEN NOW</div>
+      </div>
+      <div class="count-card">
+        <div class="num" style="color:#7ab8d4">${closedTrades.length}</div>
+        <div class="lbl">CLOSED</div>
+      </div>
+    </div>`;
+
+  // Open trades
+  if (openTrades.length > 0) {
+    html += `<div class="section-label">▸ OPEN POSITIONS</div>`;
+    openTrades.forEach(t => {
+      const color = ALGO_COLORS[t.algoKey] || '#fff';
+      html += `
+        <div class="trade-card open" style="border-left-color:${color}">
+          <div class="trade-top">
+            <div>
+              <div class="trade-ticker">${t.ticker}</div>
+              <div class="trade-algo" style="color:${color}">${ALGO_NAMES[t.algoKey] || t.algoKey.toUpperCase()}</div>
+            </div>
+            <div class="live-tag">● LIVE</div>
+          </div>
+          <div class="trade-meta">
+            <span>Bet: $${t.bet_size}</span>
+            <span>Entry: $${parseFloat(t.live_entry_price || t.entry_price || 0).toFixed(8)}</span>
+            <span>Slip: ${t.live_slippage_pct ? parseFloat(t.live_slippage_pct).toFixed(2) + '%' : '--'}</span>
+          </div>
+          ${t.live_tx_buy ? `<a class="trade-tx" href="https://solscan.io/tx/${t.live_tx_buy}" target="_blank">↗ ${t.live_tx_buy.slice(0,24)}...</a>` : ''}
+        </div>`;
+    });
+  }
+
+  // Closed trades
+  if (closedTrades.length > 0) {
+    html += `<div class="section-label" style="margin-top:6px">▸ CLOSED TRADES</div>`;
+    closedTrades.forEach(t => {
+      const pnl = parseFloat(t.live_pnl || 0);
+      const cls = pnl >= 0 ? 'win' : 'loss';
+      const pnlCls = pnl >= 0 ? 'pos' : 'neg';
+      const color = ALGO_COLORS[t.algoKey] || '#fff';
+      html += `
+        <div class="trade-card ${cls}">
+          <div class="trade-top">
+            <div>
+              <div class="trade-ticker">${t.ticker}</div>
+              <div class="trade-algo" style="color:${color}">${ALGO_NAMES[t.algoKey] || t.algoKey.toUpperCase()}</div>
+            </div>
+            <div>
+              <div class="trade-pnl ${pnlCls}">${fmt$(pnl)}</div>
+              <div style="text-align:right;margin-top:2px"><span class="exit-tag">${t.exit_reason || '--'}</span></div>
+            </div>
+          </div>
+          <div class="trade-meta">
+            <span>Bet: $${t.bet_size}</span>
+            <span>Slip: ${t.live_slippage_pct ? parseFloat(t.live_slippage_pct).toFixed(2) + '%' : '--'}</span>
+            <span>${timeSince(t.closed_at)}</span>
+          </div>
+          ${t.live_tx_sell ? `<a class="trade-tx" href="https://solscan.io/tx/${t.live_tx_sell}" target="_blank">↗ View on Solscan</a>` : ''}
+        </div>`;
+    });
+  }
+
+  // No trades yet
+  if (openTrades.length === 0 && closedTrades.length === 0) {
+    html += `
+      <div class="empty">
+        <div class="icon">🎯</div>
+        <div class="msg">SCANNING FOR SIGNALS</div>
+        <div class="sub">First real trade will appear here</div>
+      </div>`;
+  }
+
+  // Errors
+  if (errCount > 0) {
+    html += `
+      <div class="error-card">
+        <div class="error-label">⚠ EXECUTION ERRORS</div>
+        ${d.recentErrors.slice(0,3).map(e => `
+          <div class="error-item"><span>[${(e.algo||'').toUpperCase()}]</span> ${(e.err||'').slice(0,55)}</div>
+        `).join('')}
+      </div>`;
+  }
+
+  html += `
+    <button class="refresh-btn" onclick="fetchLive()">↻ REFRESH</button>
+    <div class="last-update">Updated ${new Date().toLocaleTimeString()}</div>`;
+
+  document.getElementById('app').innerHTML = html;
+}
+
+// Auto refresh every 10 seconds
+fetchLive();
+setInterval(fetchLive, 10000);
+</script>
+</body>
 </html>
